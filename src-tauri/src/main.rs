@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_imports, unused_variables, unused_constants, unused_mut, clippy::all)]
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod actions;

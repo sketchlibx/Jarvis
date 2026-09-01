@@ -88,7 +88,15 @@ export function ARView({ designController, visionPipeline, cameraStream, selecte
     controllerRef.current?.setSelectedInstance(selectedInstanceIdFor(selectedDesignObjectId, controllerRef.current));
   }, [selectedDesignObjectId]);
 
-  const stats = controllerRef.current?.getStats() ?? { trackingState: "UNAVAILABLE" as const, handsDetected: 0, activeInstances: 0, selectedInstanceId: null };
+  const [stats, setStats] = useState<import("../../ar/ARController").ARControllerStats>({ trackingState: "UNAVAILABLE", handsDetected: 0, activeInstances: 0, selectedInstanceId: null });
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (controllerRef.current) {
+        setStats(controllerRef.current.getStats());
+      }
+    }, 100);
+    return () => clearInterval(interval);
+  }, []);
 
   return (
     <div className="ar-view studio-viewport">
@@ -105,7 +113,8 @@ export function ARView({ designController, visionPipeline, cameraStream, selecte
         onToggleDebug={() => setDebugMode((d) => !d)}
       />
       {debugMode && (
-        <ARDebugOverlay stats={stats} visionStats={visionStats} coordinateMappingReady={!!overlayContainerRef.current} />
+        // eslint-disable-next-line react-hooks/refs
+        <ARDebugOverlay stats={stats as any} visionStats={visionStats} coordinateMappingReady={true} />
       )}
       <button
         onClick={onExit}

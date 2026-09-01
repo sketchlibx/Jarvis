@@ -1,3 +1,4 @@
+/* eslint-disable no-constant-condition */
 import type {
   AIProvider,
   AIMessage,
