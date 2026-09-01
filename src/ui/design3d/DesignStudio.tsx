@@ -32,7 +32,7 @@ export function DesignStudio({ onExit, onSaveProject, visionPipeline, cameraStre
   // studio's lifetime, disposed implicitly when the component unmounts
   // (the controller itself holds no browser resources; only Viewport's
   // SceneManager/GraphRenderer do, and those clean up in their own effect).
-  const controllerRef = useRef(new DesignController());
+  const [controller] = useState(() => new DesignController());
   const viewportRef = useRef<ViewportHandle>(null);
   const [projectName, setProjectName] = useState("Untitled Design");
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -48,7 +48,7 @@ export function DesignStudio({ onExit, onSaveProject, visionPipeline, cameraStre
       return;
     }
     const id = nextObjectId(type);
-    const result = controllerRef.current.apply({
+    const result = controller.apply({
       type: "CREATE_OBJECT", objectId: id, componentType: type, parameters,
       parentId: selectedId ?? null, // new components nest under the current selection, if any — matches "add three energy emitters" to the currently-selected gauntlet
     });
@@ -58,16 +58,16 @@ export function DesignStudio({ onExit, onSaveProject, visionPipeline, cameraStre
     }
   }, [selectedId, bump]);
 
-  const handleUndo = useCallback(() => { controllerRef.current.undo(); bump(); }, [bump]);
-  const handleRedo = useCallback(() => { controllerRef.current.redo(); bump(); }, [bump]);
+  const handleUndo = useCallback(() => { controller.undo(); bump(); }, [bump]);
+  const handleRedo = useCallback(() => { controller.redo(); bump(); }, [bump]);
   const handleReset = useCallback(() => {
     if (!window.confirm("Reset the design? This clears all objects and history.")) return;
-    controllerRef.current.reset();
+    controller.reset();
     setSelectedId(null);
     bump();
   }, [bump]);
   const handleSave = useCallback(async () => {
-    await onSaveProject(projectName, controllerRef.current);
+    await onSaveProject(projectName, controller);
   }, [projectName, onSaveProject]);
 
   // Keyboard shortcuts — Ctrl+Z / Ctrl+Y per spec section 14.
@@ -84,8 +84,8 @@ export function DesignStudio({ onExit, onSaveProject, visionPipeline, cameraStre
         onSave={handleSave}
         onUndo={handleUndo}
         onRedo={handleRedo}
-        canUndo={controllerRef.current.history.canUndo()}
-        canRedo={controllerRef.current.history.canRedo()}
+        canUndo={controller.history.canUndo()}
+        canRedo={controller.history.canRedo()}
         onReset={handleReset}
         onResetCamera={() => viewportRef.current?.resetCamera()}
         wireframe={wireframe}
@@ -97,7 +97,7 @@ export function DesignStudio({ onExit, onSaveProject, visionPipeline, cameraStre
       <ComponentLibraryPanel onAdd={handleAddComponent} />
       {arMode && visionPipeline && cameraStream ? (
         <ARView
-          designController={controllerRef.current}
+          designController={controller}
           visionPipeline={visionPipeline}
           cameraStream={cameraStream}
           selectedDesignObjectId={selectedId}
@@ -106,15 +106,15 @@ export function DesignStudio({ onExit, onSaveProject, visionPipeline, cameraStre
       ) : (
         <Viewport
           ref={viewportRef}
-          controller={controllerRef.current}
+          controller={controller}
           selectedId={selectedId}
           onSelect={setSelectedId}
           wireframe={wireframe}
           syncToken={syncToken}
         />
       )}
-      <InspectorPanel controller={controllerRef.current} selectedId={selectedId} onChange={bump} />
-      <HistoryBar controller={controllerRef.current} syncToken={syncToken} viewportRef={viewportRef} />
+      <InspectorPanel controller={controller} selectedId={selectedId} onChange={bump} />
+      <HistoryBar controller={controller} syncToken={syncToken} viewportRef={viewportRef} />
     </div>
   );
 }

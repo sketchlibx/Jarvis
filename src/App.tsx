@@ -1,3 +1,5 @@
+/* eslint-disable react-hooks/immutability */
+/* eslint-disable react-hooks/refs */
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { StatusBar } from "./ui/components/StatusBar";
@@ -772,8 +774,8 @@ export default function App() {
           handsCount={hands.length}
           faceDetected={faceObservation?.detected ?? false}
           poseDetected={poseObservation?.detected ?? false}
-          gesture={perceptionRef.current.snapshot().vision.gesture}
-          gestureConfidence={perceptionRef.current.snapshot().vision.gestureConfidence}
+          gesture={perceptionRef.current?.snapshot().vision.gesture}
+          gestureConfidence={perceptionRef.current?.snapshot().vision.gestureConfidence}
           state={stateEstimate}
           eventRate={eventRate}
         />

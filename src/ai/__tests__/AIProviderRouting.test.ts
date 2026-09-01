@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import { aiProviderRegistry } from "../AIProvider";
 import type { AIProvider } from "../../types/ai";
 
@@ -21,6 +21,7 @@ function uniqueName(base: string): string {
 }
 
 describe("aiProviderRegistry.route — spec sections 4, 5", () => {
+  beforeEach(() => { (aiProviderRegistry as any).entries.clear(); (aiProviderRegistry as any).activeName = null; });
   it("routes to the highest-priority provider that supports the required capability", () => {
     const gemini = uniqueName("gemini");
     const grok = uniqueName("grok");
@@ -76,6 +77,7 @@ describe("aiProviderRegistry.route — spec sections 4, 5", () => {
   });
 
   it("reports a clear failure for a forced provider that was never registered", () => {
+    aiProviderRegistry.register(fakeProvider("dummy"), { enabled: true, hasApiKey: true, priority: 1, capabilities: ["TEXT"] });
     const result = aiProviderRegistry.route({ task: "chat", forceProvider: "totally_unregistered_xyz" });
     expect(result.success).toBe(false);
     if (!result.success) expect(result.reason).toBe("forced_provider_not_found");

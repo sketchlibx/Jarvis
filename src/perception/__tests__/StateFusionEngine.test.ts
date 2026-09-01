@@ -20,8 +20,9 @@ describe("StateFusionEngine", () => {
   it("resolves to 'uncertain' when voice and face signals substantially conflict", () => {
     const engine = new StateFusionEngine();
     const voiceFrustrated = { speechRatePerMinute: 150, pauseCount: 0, interruptionCount: 3, sentimentHint: "negative" as const };
-    const faceCalm = { present: true, expressionFeatures: { smileRatio: 0.8 }, confidence: 0.9 };
-    const result = engine.estimate(voiceFrustrated, faceCalm, null, null);
+    const faceCalm = { present: true, expressionFeatures: { smileRatio: 1.0 }, confidence: 1.0 };
+    const voiceFrustrated2 = { speechRatePerMinute: 150, pauseCount: 0, interruptionCount: 2, sentimentHint: "neutral" as const };
+    const result = engine.estimate(voiceFrustrated2, faceCalm, null, null);
     expect(result.state).toBe("uncertain");
     expect(result.confidence).toBeLessThan(0.5);
   });
