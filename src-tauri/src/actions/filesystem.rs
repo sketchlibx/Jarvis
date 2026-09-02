@@ -190,7 +190,9 @@ impl Tool for CopyFileTool {
     fn rollback(&self, params: &Value) -> Result<ToolResult, ToolError> {
         let g = guard();
         let dst = g.validate(get_str(params, "destination")?, false).map_err(|e| ToolError::InvalidParams(e.to_string()))?;
-        fs::remove_file(&dst).map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+        if dst.exists() {
+            fs::remove_file(&dst).map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+        }
         Ok(ToolResult::ok(format!("Removed copy at {}", dst.display())))
     }
 }
