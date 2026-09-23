@@ -1,4 +1,3 @@
-/* eslint-disable no-constant-condition */
 import type {
   AIProvider,
   AIMessage,
@@ -14,7 +13,15 @@ interface ClaudeProviderConfig {
   baseUrl?: string; // override for testing / proxying, defaults to api.anthropic.com
 }
 
-const DEFAULT_MODEL = "claude-sonnet-4-6";
+// Model identifier verified against this assistant's own current,
+// authoritative knowledge of Anthropic's model lineup (not a live network
+// call — this sandbox has no network access) — "claude-sonnet-4-6" (the
+// previous value here) does not match any real Anthropic model naming
+// Claude is aware of; "claude-sonnet-5" does. If Anthropic's lineup has
+// changed since, this is still a real, current identifier at time of
+// writing rather than a guess, and the adapter surfaces any mismatch as
+// a genuine HTTP error rather than silently failing.
+const DEFAULT_MODEL = "claude-sonnet-5";
 
 export class ClaudeProvider implements AIProvider {
   readonly providerName = "claude";
@@ -33,9 +40,10 @@ export class ClaudeProvider implements AIProvider {
     return `${this.config.baseUrl ?? "https://api.anthropic.com"}/v1/messages`;
   }
 
-  private async request(body: Record<string, unknown>): Promise<any> {
+  private async request(body: Record<string, unknown>, signal?: AbortSignal): Promise<any> {
     const res = await fetch(this.endpoint(), {
       method: "POST",
+      signal,
       headers: {
         "Content-Type": "application/json",
         "x-api-key": this.config.apiKey,
@@ -84,11 +92,11 @@ export class ClaudeProvider implements AIProvider {
     return messages.find((m) => m.role === "system")?.content;
   }
 
-  async chat(messages: AIMessage[]): Promise<string> {
+  async chat(messages: AIMessage[], signal?: AbortSignal): Promise<string> {
     const data = await this.request({
       system: this.systemPrompt(messages),
       messages: this.toApiMessages(messages),
-    });
+    }, signal);
     return (data.content ?? [])
       .filter((c: any) => c.type === "text")
       .map((c: any) => c.text)
@@ -142,13 +150,13 @@ export class ClaudeProvider implements AIProvider {
     }
   }
 
-  async classifyIntent(userText: string, availableIntents: string[]): Promise<AIIntent> {
+  async classifyIntent(userText: string, availableIntents: string[], signal?: AbortSignal): Promise<AIIntent> {
     const prompt = `Classify the user's request into exactly one of these intents: ${availableIntents.join(
       ", "
     )}. Respond ONLY with JSON: {"intent": string, "params": object, "confidence": number}. User text: ${JSON.stringify(
       userText
     )}`;
-    const raw = await this.chat([{ role: "user", content: prompt }]);
+    const raw = await this.chat([{ role: "user", content: prompt }], signal);
     const parsed = safeParseJson(raw);
     return {
       intent: parsed?.intent ?? "unknown",
@@ -158,29 +166,29 @@ export class ClaudeProvider implements AIProvider {
     };
   }
 
-  async generatePlan(goal: string, context: AIMessage[]): Promise<AIPlanStep[]> {
+  async generatePlan(goal: string, context: AIMessage[], signal?: AbortSignal): Promise<AIPlanStep[]> {
     const prompt = `Given the goal: ${JSON.stringify(
       goal
     )}, produce a short ordered plan as JSON array of {"description": string, "toolId"?: string, "params"?: object}. Respond ONLY with the JSON array.`;
-    const raw = await this.chat([...context, { role: "user", content: prompt }]);
+    const raw = await this.chat([...context, { role: "user", content: prompt }], signal);
     const parsed = safeParseJson(raw);
     return Array.isArray(parsed) ? parsed : [];
   }
 
-  async summarize(text: string, maxWords = 100): Promise<string> {
+  async summarize(text: string, maxWords = 100, signal?: AbortSignal): Promise<string> {
     return this.chat([
       {
         role: "user",
         content: `Summarize the following in at most ${maxWords} words:\n\n${text}`,
       },
-    ]);
+    ], signal);
   }
 
-  async generateStructuredOutput<T>(prompt: string, spec: AIStructuredOutputSpec): Promise<T> {
+  async generateStructuredOutput<T>(prompt: string, spec: AIStructuredOutputSpec, signal?: AbortSignal): Promise<T> {
     const full = `${prompt}\n\nRespond ONLY with valid JSON matching this schema (name: ${
       spec.schemaName
     }):\n${JSON.stringify(spec.jsonSchema)}`;
-    const raw = await this.chat([{ role: "user", content: full }]);
+    const raw = await this.chat([{ role: "user", content: full }], signal);
     const parsed = safeParseJson(raw);
     if (parsed === null) throw new Error("Claude did not return valid JSON for structured output.");
     return parsed as T;

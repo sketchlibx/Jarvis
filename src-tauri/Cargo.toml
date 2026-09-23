@@ -22,6 +22,15 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 trash = "3"
 sysinfo = "0.31"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# Phase 7 security hardening: application-level authenticated encryption
+# for sensitive SQLite columns (memories.content, audit_logs' free-text
+# fields). RustCrypto's `aes-gcm` rather than a hand-rolled cipher — see
+# security/crypto.rs's module doc comment for why this was chosen over
+# switching the bundled SQLite engine to SQLCipher (would add an OpenSSL
+# build dependency on top of an already-fragile Windows build chain that
+# has never been compiled in any sandbox across this project's history).
+aes-gcm = { version = "0.10", features = ["std"] }
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]

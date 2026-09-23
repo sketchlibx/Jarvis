@@ -1,4 +1,4 @@
-import React, { useEffect } from "react";
+import { useEffect } from "react";
 import type { ConfirmationExplanation } from "../../types/tool";
 
 interface Props {
@@ -29,18 +29,19 @@ export function ConfirmationDialog({ explanation, onConfirm, onCancel, voiceTran
   const badgeClass = explanation.risk === "CRITICAL" ? "confirm-risk-badge--critical" : "confirm-risk-badge--high";
 
   return (
-    <div className="confirm-backdrop" role="alertdialog" aria-modal="true">
-      <div className={`confirm-card ${riskClass}`}>
+    <div
+      className="confirm-backdrop"
+      role="alertdialog"
+      aria-modal="true"
+      onClick={(e) => { if (e.target === e.currentTarget) onCancel(); }}
+    >
+      <div className={`confirm-card hud-frame ${riskClass}`}>
         <span className={`confirm-risk-badge ${badgeClass}`}>{explanation.risk}</span>
-        <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 6 }}>{explanation.action}</div>
-        <div style={{ fontSize: 13, color: "var(--text-muted)", marginBottom: 10 }}>
-          Target: {explanation.target}
-        </div>
-        <div style={{ fontSize: 14, lineHeight: 1.5 }}>{explanation.what_will_happen}</div>
+        <div className="confirm-card__action">{explanation.action}</div>
+        <div className="confirm-card__target">Target: {explanation.target}</div>
+        <div className="confirm-card__body">{explanation.what_will_happen}</div>
         {(explanation.risk === "CRITICAL") && (
-          <div style={{ fontSize: 12.5, color: "var(--danger)", marginTop: 10 }}>
-            This action may be irreversible.
-          </div>
+          <div className="confirm-card__warning">This action may be irreversible.</div>
         )}
         <div className="confirm-actions">
           <button className="confirm-btn confirm-btn--cancel" onClick={onCancel} autoFocus>

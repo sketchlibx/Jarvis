@@ -1,42 +1,76 @@
-import type { WakeWordProvider } from "../../types/voice";
+import type { SpeechToTextProvider, WakeWordProvider } from "../../types/voice";
 
 /**
- * # Status: NOT IMPLEMENTED — interface only.
+ * Functional wake-word fallback for WebSpeech/WebView2 builds.
  *
- * A real wake-word engine (e.g. Porcupine, openWakeWord) needs either a
- * licensed native model + always-on low-power audio classification loop, or
- * a bundled ONNX/TFLite model run continuously against the mic stream.
- * Doing this correctly — low CPU overhead, no cloud round-trip per frame,
- * genuine "Hey JARVIS" detection rather than a keyword-spotting placeholder
- * — is a real subsystem I cannot build and verify in this sandbox (no
- * network to fetch a model file, no way to test detection accuracy against
- * real audio).
- *
- * Per spec section 6's explicit instruction ("do not pretend that a
- * wake-word engine works if it is not actually implemented"), this class
- * does exactly what it says and nothing more: `start()` throws, so any
- * caller finds out immediately rather than silently getting a
- * non-functional listener. Push-to-talk (`WebSpeechSTTProvider`) is the
- * supported activation mode until this is genuinely implemented.
+ * This does NOT open a second microphone. It subscribes to final transcripts
+ * emitted by the existing STT recognizer and detects exact wake phrases such
+ * as "hey jarvis" / "hello jarvis". A native low-power wake-word model is
+ * still preferable for a future offline privacy-first implementation, but
+ * this fallback is real, bounded, and uses the same live recognizer the app
+ * already needs for automatic voice input.
  */
-export class NotImplementedWakeWordProvider implements WakeWordProvider {
-  isListening(): boolean {
-    return false;
-  }
+export class SpeechTranscriptWakeWordProvider implements WakeWordProvider {
+  private listening = false;
+  private unsubscribeTranscript: (() => void) | null = null;
+  private callbacks = new Set<() => void>();
+  private lastTriggerAt = 0;
+  private transcriptWindow = "";
+  private windowResetHandle: ReturnType<typeof setTimeout> | null = null;
+  private readonly phrases = [
+    /^(?:hey|hello|hi)\s+jarvis\b/i,
+    /\b(?:hey|hello|hi)\s+jarvis\b/i,
+  ];
+
+  constructor(private readonly stt: SpeechToTextProvider) {}
 
   async start(): Promise<void> {
-    throw new Error(
-      "Wake-word detection is not implemented in this build. Use push-to-talk instead. See SETUP.md 'Wake word status'."
-    );
+    if (this.listening) return;
+    if (!this.stt.onFinalTranscript) {
+      throw new Error("Wake-word fallback requires a transcript-capable speech recognizer.");
+    }
+    this.listening = true;
+    this.unsubscribeTranscript = this.stt.onFinalTranscript((transcript) => {
+      const normalized = transcript.trim().replace(/\s+/g, " ");
+      if (!normalized) return;
+      this.transcriptWindow = `${this.transcriptWindow} ${normalized}`.trim().replace(/\s+/g, " ").slice(-220);
+      if (this.windowResetHandle) clearTimeout(this.windowResetHandle);
+      this.windowResetHandle = setTimeout(() => {
+        this.transcriptWindow = "";
+        this.windowResetHandle = null;
+      }, 2400);
+      if (!this.phrases.some((pattern) => pattern.test(this.transcriptWindow))) return;
+      const now = Date.now();
+      if (now - this.lastTriggerAt < 1800) return;
+      this.lastTriggerAt = now;
+      this.callbacks.forEach((cb) => cb());
+    });
   }
 
   stop(): void {
-    // no-op: nothing was ever started
+    this.unsubscribeTranscript?.();
+    this.unsubscribeTranscript = null;
+    if (this.windowResetHandle) clearTimeout(this.windowResetHandle);
+    this.windowResetHandle = null;
+    this.transcriptWindow = "";
+    this.listening = false;
   }
 
-  onWakeWord(_cb: () => void): () => void {
-    // Returns a valid unsubscribe function so callers that wire this up
-    // speculatively don't crash — but the callback will simply never fire.
-    return () => {};
+  isListening(): boolean { return this.listening && (this.stt.getStatus() === "starting" || this.stt.getStatus() === "listening"); }
+
+  onWakeWord(cb: () => void): () => void {
+    this.callbacks.add(cb);
+    return () => this.callbacks.delete(cb);
   }
+}
+
+/** Kept as an explicit honest provider for environments where no
+ * transcript-capable STT exists. */
+export class NotImplementedWakeWordProvider implements WakeWordProvider {
+  isListening(): boolean { return false; }
+  async start(): Promise<void> {
+    throw new Error("No wake-word-capable speech recognizer is available in this WebView.");
+  }
+  stop(): void {}
+  onWakeWord(_cb: () => void): () => void { return () => {}; }
 }

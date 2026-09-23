@@ -1,4 +1,3 @@
-import React from "react";
 import type { DesignController } from "../../design3d/commands/DesignController";
 import { MATERIAL_PRESETS, listMaterialPresets } from "../../design3d/materials/presets";
 import type { MaterialPresetName } from "../../design3d/types";

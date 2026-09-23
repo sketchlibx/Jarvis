@@ -1,5 +1,6 @@
-import React from "react";
 import type { VisionPipelineStats, GestureLabel, StateEstimate } from "../../types/perception";
+import type { JarvisState } from "../../orchestrator/JarvisStateMachine";
+import type { ActivityEntry } from "../../orchestrator/ActivityLog";
 
 interface Props {
   stats: VisionPipelineStats | null;
@@ -10,6 +11,14 @@ interface Props {
   gestureConfidence: number | null;
   state: StateEstimate | null;
   eventRate: number; // events/sec observed on the EventBus
+  /** Formerly shown as always-visible Home-screen rails (Core/System/
+   * Activity) — moved here per the "debug/developer information must
+   * never clutter the normal UI" redesign instruction. Same real data,
+   * just gated behind the same debug toggle as everything else here. */
+  jarvisState: JarvisState;
+  activeProviderName: string | null;
+  isOnline: boolean;
+  latestActivity: ActivityEntry | null;
 }
 
 /**
@@ -17,9 +26,16 @@ interface Props {
  * be disabled or minimized in normal UI") — the parent (App.tsx) controls
  * visibility via a toggle, this component just renders the numbers when shown.
  */
-export function DebugPanel({ stats, handsCount, faceDetected, poseDetected, gesture, gestureConfidence, state, eventRate }: Props) {
+export function DebugPanel({
+  stats, handsCount, faceDetected, poseDetected, gesture, gestureConfidence, state, eventRate,
+  jarvisState, activeProviderName, isOnline, latestActivity,
+}: Props) {
   return (
-    <div className="glass-panel" style={{ padding: "10px 14px", fontSize: 11, fontFamily: "var(--font-mono)", color: "var(--text-muted)", display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "4px 16px" }}>
+    <div className="glass-panel debug-panel" style={{ padding: "10px 14px", fontSize: 11, fontFamily: "var(--font-mono)", color: "var(--text-muted)", display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "4px 16px" }}>
+      <div>core state: <span style={{ color: "var(--text-primary)" }}>{jarvisState}</span></div>
+      <div>provider: <span style={{ color: "var(--text-primary)" }}>{activeProviderName ?? "—"}</span></div>
+      <div>network: <span style={{ color: isOnline ? "var(--safe)" : "var(--danger)" }}>{isOnline ? "online" : "offline"}</span></div>
+      <div>last action: <span style={{ color: "var(--text-primary)" }}>{latestActivity?.toolName ?? "—"}</span></div>
       <div>camera fps: <span style={{ color: "var(--text-primary)" }}>{stats?.cameraFps ?? "—"}</span></div>
       <div>vision fps: <span style={{ color: "var(--text-primary)" }}>{stats?.visionFps ?? "—"}</span></div>
       <div>hands: <span style={{ color: "var(--text-primary)" }}>{handsCount}</span></div>

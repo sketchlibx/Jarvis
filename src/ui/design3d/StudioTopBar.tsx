@@ -1,4 +1,3 @@
-import React from "react";
 
 interface Props {
   projectName: string;
@@ -22,7 +21,7 @@ interface Props {
 
 export function StudioTopBar(props: Props) {
   return (
-    <div className="glass-panel studio-toolbar studio-top">
+    <div className="glass-panel hud-frame studio-toolbar studio-top">
       <button className="studio-toolbar-btn studio-toolbar-btn--nav" onClick={props.onExit}>← Assistant</button>
       <input
         value={props.projectName}

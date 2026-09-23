@@ -59,15 +59,28 @@ pub fn save_provider_key(provider_name: &str, api_key: &str) -> Result<(), Strin
         .map_err(|e| format!("failed to save key to OS keychain: {e}"))
 }
 
-/// Used ONLY by the actual provider HTTP call site (e.g. a Rust-side proxy
-/// call, if one exists) — never exposed as a Tauri command callable from
-/// the frontend. If provider calls are made from the frontend (current
-/// architecture, per `ClaudeProvider.ts`), this function is intentionally
-/// unused there; the frontend must never receive a raw key. Kept here as
-/// the correct, secure seam for a future Rust-side provider proxy without
-/// requiring a second storage mechanism.
-#[allow(dead_code)]
-pub(crate) fn get_provider_key_for_internal_use(provider_name: &str) -> Result<Option<String>, String> {
+/// Retrieves the actual key value — used by `commands.rs`'s
+/// `load_provider_key_for_session` Tauri command.
+///
+/// # Why this is exposed to the frontend (a deliberate, documented decision)
+/// This project's AI provider calls happen from the FRONTEND
+/// (`ClaudeProvider.ts`/`GeminiProvider.ts`/etc. all call `fetch()`
+/// directly — see ARCHITECTURE.md), not from a Rust-side HTTP proxy. That
+/// means the frontend genuinely needs the raw key in memory to construct
+/// a working provider instance and make real API calls — there is no way
+/// around this without building a second, parallel Rust-side HTTP client
+/// for every provider (which spec instructions have repeatedly warned
+/// against as "a second AI system").
+///
+/// The security property this module protects is narrower than "never in
+/// frontend memory": it is "never in plaintext on disk, never logged,
+/// never in an error string, never re-displayed in the Settings UI." The
+/// OS keychain is the durable secure store; loading a key back into
+/// process memory to actually use it is the normal, expected pattern for
+/// any keychain-backed application — the alternative (asking the user to
+/// re-type every API key every time the app launches) is not a stronger
+/// security posture, it is a worse one.
+pub fn get_provider_key(provider_name: &str) -> Result<Option<String>, String> {
     let entry = entry_for(provider_name)?;
     match entry.get_password() {
         Ok(key) => Ok(Some(key)),

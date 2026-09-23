@@ -1,0 +1,2207 @@
+==== /mnt/data/jarvis/src/ui/ar/ARControlBar.tsx
+import type { TrackingState, ARInteractionMode } from "../../ar/types";
+
+interface Props {
+  arEnabled: boolean;
+  onToggleAR: () => void;
+  selectedObjectName: string | null;
+  trackingState: TrackingState;
+  currentGesture: string | null;
+  /** Real per-instance interactionMode for the current selection (see
+   * ARController.getStats()) — null when nothing is selected. Renders as
+   * a badge only when there's something meaningful to say (GRABBING/
+   * TWO_HAND_TRANSFORMING); IDLE/HOVER don't need their own badge. */
+  interactionMode: ARInteractionMode | null;
+  onOpenCalibration: () => void;
+  debugMode: boolean;
+  onToggleDebug: () => void;
+}
+
+function trackingBadgeClass(state: TrackingState): string {
+  if (state === "TRACKING") return "ar-badge ar-badge--tracking";
+  if (state === "DEGRADED") return "ar-badge ar-badge--degraded";
+  if (state === "LOST") return "ar-badge ar-badge--lost";
+  return "ar-badge";
+}
+
+function interactionBadgeClass(mode: ARInteractionMode): string {
+  if (mode === "GRABBING") return "ar-badge ar-badge--grabbing";
+  if (mode === "TWO_HAND_TRANSFORMING") return "ar-badge ar-badge--transforming";
+  return "ar-badge";
+}
+
+/** Keeps the JARVIS glass-panel visual language; positioned to never cover
+ * the center of the camera view (spec section 40's explicit requirement),
+ * living in a thin strip along the top instead. */
+export function ARControlBar({
+  arEnabled, onToggleAR, selectedObjectName, trackingState, currentGesture, interactionMode, onOpenCalibration, debugMode, onToggleDebug,
+}: Props) {
+  return (
+    <div className="glass-panel ar-control-bar">
+      <button className="studio-toolbar-btn studio-toolbar-btn--nav" onClick={onToggleAR}>
+        AR {arEnabled ? "ON" : "OFF"}
+      </button>
+      {arEnabled && (
+        <>
+          <span className="ar-badge">{selectedObjectName ?? "no selection"}</span>
+          <span className={trackingBadgeClass(trackingState)}>{trackingState}</span>
+          {currentGesture && <span className="ar-badge">{currentGesture}</span>}
+          {interactionMode && interactionMode !== "IDLE" && interactionMode !== "HOVER" && (
+            <span className={interactionBadgeClass(interactionMode)}>{interactionMode.replace(/_/g, " ")}</span>
+          )}
+          <button className="studio-toolbar-btn" onClick={onOpenCalibration}>Calibration</button>
+          <button
+            className={`studio-toolbar-btn ${debugMode ? "studio-toolbar-btn--active" : ""}`}
+            onClick={onToggleDebug}
+            style={{ marginLeft: "auto" }}
+          >
+            Debug
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+==== /mnt/data/jarvis/src/ui/ar/ARDebugOverlay.tsx
+import type { ARControllerStats } from "../../ar/ARController";
+import type { VisionPipelineStats } from "../../types/perception";
+
+interface Props {
+  stats: ARControllerStats;
+  visionStats: VisionPipelineStats | null;
+  coordinateMappingReady: boolean;
+}
+
+export function ARDebugOverlay({ stats, visionStats, coordinateMappingReady }: Props) {
+  return (
+    <div className="glass-panel ar-debug-overlay">
+      <div>camera fps: <span style={{ color: "var(--text-primary)" }}>{visionStats?.cameraFps ?? "—"}</span></div>
+      <div>vision fps: <span style={{ color: "var(--text-primary)" }}>{visionStats?.visionFps ?? "—"}</span></div>
+      <div>hands: <span style={{ color: "var(--text-primary)" }}>{stats.handsDetected}</span></div>
+      <div>tracking: <span style={{ color: "var(--text-primary)" }}>{stats.trackingState}</span></div>
+      <div>instances: <span style={{ color: "var(--text-primary)" }}>{stats.activeInstances}</span></div>
+      <div>selected: <span style={{ color: "var(--text-primary)" }}>{stats.selectedInstanceId ?? "—"}</span></div>
+      <div>interaction: <span style={{ color: "var(--text-primary)" }}>{stats.selectedInteractionMode ?? "—"}</span></div>
+      <div>coord mapping: <span style={{ color: coordinateMappingReady ? "var(--safe)" : "var(--danger)" }}>{coordinateMappingReady ? "ready" : "not ready"}</span></div>
+      <div>hands model: <span style={{ color: visionStats?.handsInitialized ? "var(--safe)" : "var(--text-muted)" }}>{visionStats?.handsInitialized ? "loaded" : "not loaded"}</span></div>
+    </div>
+  );
+}
+==== /mnt/data/jarvis/src/ui/ar/ARView.tsx
+import { useEffect, useRef, useState } from "react";
+import { ARController } from "../../ar/ARController";
+import { ARControlBar } from "./ARControlBar";
+import { ARDebugOverlay } from "./ARDebugOverlay";
+import type { DesignController } from "../../design3d/commands/DesignController";
+import type { VisionPipeline } from "../../vision/VisionPipeline";
+import type { VisionPipelineStats } from "../../types/perception";
+import type { GestureLabel } from "../../types/perception";
+
+interface Props {
+  designController: DesignController;
+  /** Reused, not duplicated — the SAME VisionPipeline instance the main
+   * Assistant view's camera panel already drives (spec section 1: "do not
+   * create duplicate camera/MediaPipe systems"). ARView only subscribes to
+   * its snapshot/stats streams; it never calls start()/stop() on the
+   * camera itself — that remains the main view's responsibility, so AR
+   * mode never creates a second capture pipeline. */
+  visionPipeline: VisionPipeline;
+  cameraStream: MediaStream | null;
+  selectedDesignObjectId: string | null;
+  onExit: () => void;
+}
+
+/**
+ * # Status: UNVERIFIED (no browser/WebGL/camera available in this sandbox).
+ *
+ * Composes the real camera `<video>` (spec section 6: stays visible
+ * underneath) with `ARScene`'s transparent canvas on top, both inside one
+ * positioned container so they share exact pixel alignment. Written
+ * carefully against real browser APIs, not run.
+ */
+export function ARView({ designController, visionPipeline, cameraStream, selectedDesignObjectId, onExit }: Props) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const overlayContainerRef = useRef<HTMLDivElement>(null);
+  const controllerRef = useRef<ARController | null>(null);
+
+  const [arEnabled, setArEnabled] = useState(true);
+  const arEnabledRef = useRef(arEnabled);
+  useEffect(() => { arEnabledRef.current = arEnabled; }, [arEnabled]);
+  const [debugMode, setDebugMode] = useState(false);
+  const [visionStats, setVisionStats] = useState<VisionPipelineStats | null>(null);
+  const [currentGesture, setCurrentGesture] = useState<GestureLabel | null>(null);
+  const [, setStatsTick] = useState(0);
+
+  useEffect(() => {
+    if (videoRef.current && cameraStream) {
+      videoRef.current.srcObject = cameraStream;
+    }
+  }, [cameraStream]);
+
+  useEffect(() => {
+    const container = overlayContainerRef.current;
+    if (!container) return;
+
+    const viewport = { width: container.clientWidth, height: container.clientHeight, verticalFovDegrees: 50, projectionDistance: 1 };
+    const controller = new ARController(designController, viewport);
+    controller.scene.mount(container);
+    controllerRef.current = controller;
+
+    const resizeObserver = new ResizeObserver(() => {
+      controller.updateViewport({ width: container.clientWidth, height: container.clientHeight });
+    });
+    resizeObserver.observe(container);
+
+    // Subscribe to the EXISTING VisionPipeline's snapshot stream — this is
+    // the reuse point spec section 1 requires. ARView never calls
+    // visionPipeline.start()/attachStream() itself.
+    const unsubSnapshot = visionPipeline.onSnapshot((snapshot) => {
+      if (!arEnabledRef.current) return; // AR OFF: stop updating anchors/transforms entirely, not just hide the canvas
+      const nowMs = Date.now();
+      controller.update(nowMs, snapshot.hands, snapshot.face, snapshot.pose);
+      // Real gesture from the SAME snapshot VisionPipeline already
+      // produces (GestureEngine.classify() output) — not a second
+      // classifier. Mirrors the exact `gestures[0] ?? null` pattern
+      // VisionPipeline itself uses for PerceptionContext.
+      const gesture = snapshot.gestures[0];
+      setCurrentGesture(gesture && gesture.gesture !== "none" ? gesture.gesture : null);
+      setStatsTick((t) => t + 1);
+    });
+    const unsubStats = visionPipeline.onStats(setVisionStats);
+
+    return () => {
+      resizeObserver.disconnect();
+      unsubSnapshot();
+      unsubStats();
+      // Full teardown per spec section 38 — but the underlying
+      // VisionPipeline/camera keep running if the main view still needs
+      // them; ARView only tears down what IT owns (the transparent scene).
+      controller.dispose();
+      controllerRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    controllerRef.current?.setSelectedInstance(selectedInstanceIdFor(selectedDesignObjectId, controllerRef.current));
+  }, [selectedDesignObjectId]);
+
+  const stats = controllerRef.current?.getStats() ?? { trackingState: "UNAVAILABLE" as const, handsDetected: 0, activeInstances: 0, selectedInstanceId: null, selectedInteractionMode: null };
+
+  return (
+    <div className="ar-view studio-viewport">
+      <video ref={videoRef} autoPlay playsInline muted />
+      <div ref={overlayContainerRef} style={{ position: "absolute", inset: 0 }} />
+      <ARControlBar
+        arEnabled={arEnabled}
+        onToggleAR={() => setArEnabled((e) => !e)}
+        selectedObjectName={selectedDesignObjectId}
+        trackingState={stats.trackingState}
+        currentGesture={currentGesture}
+        interactionMode={stats.selectedInteractionMode}
+        onOpenCalibration={() => { /* opens a calibration panel — see README for current scope */ }}
+        debugMode={debugMode}
+        onToggleDebug={() => setDebugMode((d) => !d)}
+      />
+      {debugMode && (
+        <ARDebugOverlay stats={stats} visionStats={visionStats} coordinateMappingReady={!!overlayContainerRef.current} />
+      )}
+      <button className="ar-exit-btn" onClick={onExit}>Exit AR</button>
+    </div>
+  );
+}
+
+/** Maps a selected DesignGraph object id to whatever AR instance
+ * currently references it, if any — the deterministic selection strategy
+ * spec section 21 asks for (no gesture-guessed selection). */
+function selectedInstanceIdFor(designObjectId: string | null, controller: ARController | null): string | null {
+  if (!designObjectId || !controller) return null;
+  const match = controller.instanceManager.all().find((i) => i.designObjectId === designObjectId);
+  return match?.id ?? null;
+}
+==== /mnt/data/jarvis/src/ui/components/AudioVisualizer.tsx
+import { useEffect, useRef, useState } from "react";
+
+/**
+ * Simple bar visualizer driven by an AnalyserNode. Renders flat/idle bars
+ * when `active` is false rather than faking activity.
+ */
+export function AudioVisualizer({ analyser, active, barCount = 24 }: { analyser: AnalyserNode | null; active: boolean; barCount?: number }) {
+  const [levels, setLevels] = useState<number[]>(new Array(barCount).fill(2));
+  const rafRef = useRef<number>();
+
+  useEffect(() => {
+    if (!active || !analyser) {
+      setLevels(new Array(barCount).fill(2));
+      return;
+    }
+    const data = new Uint8Array(analyser.frequencyBinCount);
+    const step = Math.floor(data.length / barCount) || 1;
+
+    const tick = () => {
+      analyser.getByteFrequencyData(data);
+      const next: number[] = [];
+      for (let i = 0; i < barCount; i++) {
+        const v = data[i * step] ?? 0;
+        next.push(Math.max(2, (v / 255) * 22));
+      }
+      setLevels(next);
+      rafRef.current = requestAnimationFrame(tick);
+    };
+    rafRef.current = requestAnimationFrame(tick);
+    return () => {
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    };
+  }, [active, analyser, barCount]);
+
+  return (
+    <div className="visualizer" aria-hidden="true">
+      {levels.map((h, i) => (
+        <div key={i} className="visualizer__bar" style={{ height: `${h}px` }} />
+      ))}
+    </div>
+  );
+}
+==== /mnt/data/jarvis/src/ui/components/CameraPanel.tsx
+import { useEffect, useRef } from "react";
+import type { CameraStatus } from "../../types/vision";
+import type { FaceObservation, HandObservation, PoseObservation } from "../../types/perception";
+
+interface Props {
+  status: CameraStatus;
+  stream: MediaStream | null;
+  hands: HandObservation[];
+  face?: FaceObservation | null;
+  pose?: PoseObservation | null;
+  /** Real numbers from VisionPipeline's own frame/detector counters —
+   * never derived from React's render rate (spec section 16 explicitly
+   * forbids that). Undefined until the pipeline reports its first stats
+   * tick, in which case we simply don't show an FPS figure yet rather
+   * than showing a fake 0 or placeholder. */
+  cameraFps?: number;
+  visionFps?: number;
+  onStart: () => void;
+  onStop: () => void;
+}
+
+const STATUS_LABEL: Record<CameraStatus, string> = {
+  unavailable: "Camera unavailable",
+  permission_denied: "Camera permission denied",
+  off: "Camera off",
+  starting: "Starting…",
+  on: "Live",
+  error: "Camera error",
+};
+
+// MediaPipe Hands connections (pairs of landmark indices) for drawing the
+// skeleton, not just dots — standard MediaPipe hand topology.
+const HAND_CONNECTIONS: Array<[number, number]> = [
+  [0, 1], [1, 2], [2, 3], [3, 4],       // thumb
+  [0, 5], [5, 6], [6, 7], [7, 8],       // index
+  [5, 9], [9, 10], [10, 11], [11, 12],  // middle
+  [9, 13], [13, 14], [14, 15], [15, 16],// ring
+  [13, 17], [17, 18], [18, 19], [19, 20], // pinky
+  [0, 17],
+];
+
+/**
+ * Displays the live camera feed plus a real landmark overlay drawn from
+ * REAL detection results passed in via `hands`/`face`/`pose` — never
+ * synthetic/demo landmarks. When those are empty (no detector active, or
+ * nothing detected this frame), the overlay simply draws nothing rather
+ * than a placeholder.
+ *
+ * The overlay canvas and video share the same CSS transform (mirrored via
+ * `.camera-panel__overlay-canvas` in global.css using the same
+ * `scaleX(-1)` as `.camera-panel video`), so landmark coordinates are
+ * drawn in their original, un-mirrored normalized space — the mirroring is
+ * a pure CSS presentation transform applied identically to both layers,
+ * not a coordinate transform we compute ourselves (spec section 15's
+ * explicit warning against altering underlying coordinates for display reasons).
+ */
+export function CameraPanel({ status, stream, hands, face, pose, cameraFps, visionFps, onStart, onStop }: Props) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    if (videoRef.current && stream) {
+      videoRef.current.srcObject = stream;
+    }
+  }, [stream]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const video = videoRef.current;
+    if (!canvas || !video) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    canvas.width = video.clientWidth;
+    canvas.height = video.clientHeight;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    for (const hand of hands) {
+      ctx.strokeStyle = "rgba(78, 225, 255, 0.5)";
+      ctx.lineWidth = 2;
+      for (const [a, b] of HAND_CONNECTIONS) {
+        const la = hand.landmarks[a];
+        const lb = hand.landmarks[b];
+        if (!la || !lb) continue;
+        ctx.beginPath();
+        ctx.moveTo(la.x * canvas.width, la.y * canvas.height);
+        ctx.lineTo(lb.x * canvas.width, lb.y * canvas.height);
+        ctx.stroke();
+      }
+      ctx.fillStyle = "rgba(78, 225, 255, 0.9)";
+      for (const lm of hand.landmarks) {
+        ctx.beginPath();
+        ctx.arc(lm.x * canvas.width, lm.y * canvas.height, 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    if (face?.detected) {
+      ctx.fillStyle = "rgba(255, 184, 77, 0.7)";
+      // Sparse sample rather than all 468 points — a dense dot cloud reads
+      // as noise at this resolution; every 7th point still traces the mesh
+      // shape clearly.
+      for (let i = 0; i < face.landmarks.length; i += 7) {
+        const lm = face.landmarks[i];
+        ctx.beginPath();
+        ctx.arc(lm.x * canvas.width, lm.y * canvas.height, 1.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    if (pose?.detected) {
+      ctx.fillStyle = "rgba(78, 225, 160, 0.9)";
+      ctx.strokeStyle = "rgba(78, 225, 160, 0.5)";
+      ctx.lineWidth = 2;
+      const pts = pose.landmarks;
+      const skeleton: Array<[typeof pts.leftShoulder, typeof pts.rightShoulder]> = [
+        [pts.leftShoulder, pts.rightShoulder],
+        [pts.leftShoulder, pts.leftElbow], [pts.leftElbow, pts.leftWrist],
+        [pts.rightShoulder, pts.rightElbow], [pts.rightElbow, pts.rightWrist],
+      ];
+      for (const [a, b] of skeleton) {
+        if (!a || !b) continue;
+        ctx.beginPath();
+        ctx.moveTo(a.x * canvas.width, a.y * canvas.height);
+        ctx.lineTo(b.x * canvas.width, b.y * canvas.height);
+        ctx.stroke();
+      }
+      for (const p of Object.values(pts)) {
+        if (!p) continue;
+        ctx.beginPath();
+        ctx.arc(p.x * canvas.width, p.y * canvas.height, 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }, [hands, face, pose]);
+
+  if (status !== "on" && status !== "starting") {
+    return (
+      <div className="glass-panel hud-frame camera-panel">
+        <div className="camera-panel__off">
+          <span>{STATUS_LABEL[status]}</span>
+          {(status === "off" || status === "error") && (
+            <button className="camera-btn" onClick={onStart}>Start Camera</button>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  const fpsLabel = cameraFps !== undefined && visionFps !== undefined ? ` · ${cameraFps} fps cam / ${visionFps} fps vision` : "";
+
+  return (
+    <div className="glass-panel hud-frame camera-panel">
+      <video ref={videoRef} autoPlay playsInline muted />
+      <canvas ref={canvasRef} className="camera-panel__overlay-canvas" />
+      <div className="camera-panel__badge">
+        <span className="status-dot__indicator" style={{ background: "var(--safe)", boxShadow: "0 0 6px var(--safe)" }} />
+        {STATUS_LABEL[status]} {hands.length > 0 && `· ${hands.length} hand(s)`}
+        {face?.detected && " · face"} {pose?.detected && " · pose"}
+        {fpsLabel}
+      </div>
+      <div className="camera-panel__controls">
+        <button className="camera-btn camera-btn--stop" onClick={onStop}>Stop Camera</button>
+      </div>
+    </div>
+  );
+}
+==== /mnt/data/jarvis/src/ui/components/ConfirmationDialog.tsx
+import { useEffect } from "react";
+import type { ConfirmationExplanation } from "../../types/tool";
+
+interface Props {
+  explanation: ConfirmationExplanation;
+  onConfirm: () => void;
+  onCancel: () => void;
+  /** Optional: wire voice "confirm"/"cancel" transcript matches here. */
+  voiceTranscript?: string;
+}
+
+export function ConfirmationDialog({ explanation, onConfirm, onCancel, voiceTranscript }: Props) {
+  useEffect(() => {
+    if (!voiceTranscript) return;
+    const t = voiceTranscript.trim().toLowerCase();
+    if (t === "confirm") onConfirm();
+    else if (t === "cancel") onCancel();
+  }, [voiceTranscript, onConfirm, onCancel]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onCancel();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onCancel]);
+
+  const riskClass = explanation.risk === "CRITICAL" ? "confirm-card--critical" : "confirm-card--high";
+  const badgeClass = explanation.risk === "CRITICAL" ? "confirm-risk-badge--critical" : "confirm-risk-badge--high";
+
+  return (
+    <div
+      className="confirm-backdrop"
+      role="alertdialog"
+      aria-modal="true"
+      onClick={(e) => { if (e.target === e.currentTarget) onCancel(); }}
+    >
+      <div className={`confirm-card hud-frame ${riskClass}`}>
+        <span className={`confirm-risk-badge ${badgeClass}`}>{explanation.risk}</span>
+        <div className="confirm-card__action">{explanation.action}</div>
+        <div className="confirm-card__target">Target: {explanation.target}</div>
+        <div className="confirm-card__body">{explanation.what_will_happen}</div>
+        {(explanation.risk === "CRITICAL") && (
+          <div className="confirm-card__warning">This action may be irreversible.</div>
+        )}
+        <div className="confirm-actions">
+          <button className="confirm-btn confirm-btn--cancel" onClick={onCancel} autoFocus>
+            Cancel
+          </button>
+          <button className="confirm-btn confirm-btn--confirm" onClick={onConfirm}>
+            Confirm
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+==== /mnt/data/jarvis/src/ui/components/ConflictDialog.tsx
+
+import { useEffect } from "react";
+
+interface Props {
+  destination: string;
+  onReplace: () => void;
+  onCopy: () => void;
+  onCancel: () => void;
+}
+
+/**
+ * Shown whenever a filesystem tool returns a CONFLICT (destination_exists).
+ * JARVIS never silently overwrites — this is the only path to replacing an
+ * existing file, and choosing Replace still routes through the HIGH_RISK
+ * `replace_file` tool + ConfirmationDialog afterward, it doesn't skip it.
+ */
+export function ConflictDialog({ destination, onReplace, onCopy, onCancel }: Props) {
+  const filename = destination.split(/[\\/]/).pop() ?? destination;
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onCancel();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onCancel]);
+
+  return (
+    <div
+      className="confirm-backdrop"
+      role="alertdialog"
+      aria-modal="true"
+      onClick={(e) => { if (e.target === e.currentTarget) onCancel(); }}
+    >
+      <div className="confirm-card hud-frame confirm-card--info">
+        <span className="confirm-risk-badge confirm-risk-badge--info">ALREADY EXISTS</span>
+        <div className="confirm-card__action">{filename} already exists</div>
+        <div className="confirm-card__body">Replace it, keep both by creating a copy, or cancel.</div>
+        <div className="confirm-actions confirm-actions--wrap">
+          <button className="confirm-btn confirm-btn--cancel" onClick={onCancel} autoFocus>Cancel</button>
+          <button className="confirm-btn confirm-btn--info" onClick={onCopy}>Create Copy</button>
+          <button className="confirm-btn confirm-btn--confirm" onClick={onReplace}>Replace</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+==== /mnt/data/jarvis/src/ui/components/ConversationView.tsx
+import { useEffect, useRef } from "react";
+import type { AIMessage } from "../../types/ai";
+
+interface Props {
+  messages: AIMessage[];
+  /** Real JarvisState-derived flag (state === "THINKING") — not a fake
+   * "typing…" simulation. See App.tsx's stateMachine wiring. */
+  isThinking?: boolean;
+}
+
+export function ConversationView({ messages, isThinking }: Props) {
+  const bottomRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages.length, isThinking]);
+
+  return (
+    <div className="glass-panel conversation">
+      {messages.length === 0 && !isThinking && (
+        <div className="conversation__empty">Say something, or type below to begin.</div>
+      )}
+      {messages
+        .filter((m) => m.role !== "system")
+        .map((m, i) => (
+          <div key={i} className={`bubble bubble--${m.role === "user" ? "user" : "assistant"}`}>
+            {m.content}
+          </div>
+        ))}
+      {isThinking && (
+        <div className="bubble bubble--assistant bubble--thinking" aria-live="polite">
+          <span className="thinking-dot" /><span className="thinking-dot" /><span className="thinking-dot" />
+        </div>
+      )}
+      <div ref={bottomRef} />
+    </div>
+  );
+}
+==== /mnt/data/jarvis/src/ui/components/DebugPanel.tsx
+import type { VisionPipelineStats, GestureLabel, StateEstimate } from "../../types/perception";
+import type { JarvisState } from "../../orchestrator/JarvisStateMachine";
+import type { ActivityEntry } from "../../orchestrator/ActivityLog";
+
+interface Props {
+  stats: VisionPipelineStats | null;
+  handsCount: number;
+  faceDetected: boolean;
+  poseDetected: boolean;
+  gesture: GestureLabel | null;
+  gestureConfidence: number | null;
+  state: StateEstimate | null;
+  eventRate: number; // events/sec observed on the EventBus
+  /** Formerly shown as always-visible Home-screen rails (Core/System/
+   * Activity) — moved here per the "debug/developer information must
+   * never clutter the normal UI" redesign instruction. Same real data,
+   * just gated behind the same debug toggle as everything else here. */
+  jarvisState: JarvisState;
+  activeProviderName: string | null;
+  isOnline: boolean;
+  latestActivity: ActivityEntry | null;
+}
+
+/**
+ * Minimized/collapsed by default per spec section 31 ("debug mode should
+ * be disabled or minimized in normal UI") — the parent (App.tsx) controls
+ * visibility via a toggle, this component just renders the numbers when shown.
+ */
+export function DebugPanel({
+  stats, handsCount, faceDetected, poseDetected, gesture, gestureConfidence, state, eventRate,
+  jarvisState, activeProviderName, isOnline, latestActivity,
+}: Props) {
+  return (
+    <div className="glass-panel debug-panel" style={{ padding: "10px 14px", fontSize: 11, fontFamily: "var(--font-mono)", color: "var(--text-muted)", display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "4px 16px" }}>
+      <div>core state: <span style={{ color: "var(--text-primary)" }}>{jarvisState}</span></div>
+      <div>provider: <span style={{ color: "var(--text-primary)" }}>{activeProviderName ?? "—"}</span></div>
+      <div>network: <span style={{ color: isOnline ? "var(--safe)" : "var(--danger)" }}>{isOnline ? "online" : "offline"}</span></div>
+      <div>last action: <span style={{ color: "var(--text-primary)" }}>{latestActivity?.toolName ?? "—"}</span></div>
+      <div>camera fps: <span style={{ color: "var(--text-primary)" }}>{stats?.cameraFps ?? "—"}</span></div>
+      <div>vision fps: <span style={{ color: "var(--text-primary)" }}>{stats?.visionFps ?? "—"}</span></div>
+      <div>hands: <span style={{ color: "var(--text-primary)" }}>{handsCount}</span></div>
+      <div>face: <span style={{ color: "var(--text-primary)" }}>{faceDetected ? "detected" : "—"}</span></div>
+      <div>pose: <span style={{ color: "var(--text-primary)" }}>{poseDetected ? "detected" : "—"}</span></div>
+      <div>gesture: <span style={{ color: "var(--text-primary)" }}>{gesture ?? "—"}{gestureConfidence != null ? ` (${gestureConfidence.toFixed(2)})` : ""}</span></div>
+      <div>state: <span style={{ color: "var(--text-primary)" }}>{state ? `${state.state} (${state.confidence.toFixed(2)})` : "—"}</span></div>
+      <div>event rate: <span style={{ color: "var(--text-primary)" }}>{eventRate.toFixed(1)}/s</span></div>
+      <div>hands model: <span style={{ color: stats?.handsInitialized ? "var(--safe)" : "var(--text-muted)" }}>{stats?.handsInitialized ? "loaded" : "not loaded"}</span></div>
+      <div>face model: <span style={{ color: stats?.faceInitialized ? "var(--safe)" : "var(--text-muted)" }}>{stats?.faceInitialized ? "loaded" : "not loaded"}</span></div>
+      <div>pose model: <span style={{ color: stats?.poseInitialized ? "var(--safe)" : "var(--text-muted)" }}>{stats?.poseInitialized ? "loaded" : "not loaded"}</span></div>
+    </div>
+  );
+}
+==== /mnt/data/jarvis/src/ui/components/StateIndicator.tsx
+import type { StateEstimate } from "../../types/perception";
+
+const STATE_PHRASING: Record<StateEstimate["state"], string> = {
+  calm: "calm",
+  focused: "focused",
+  confused: "possibly confused",
+  frustrated: "possibly frustrated",
+  excited: "excited",
+  uncertain: "uncertain",
+  neutral: "neutral",
+};
+
+/**
+ * Always renders the confidence number alongside the label — never a bare
+ * assertion. Per spec section 16/40, perception is uncertain and the UI
+ * must not let that get lost. Below the confidence threshold, this
+ * component doesn't render a claim at all.
+ */
+export function StateIndicator({ estimate, enabled }: { estimate: StateEstimate | null; enabled: boolean }) {
+  if (!enabled) return null;
+  if (!estimate || estimate.confidence < 0.15) {
+    return (
+      <div className="state-indicator">
+        <span className="state-indicator__pill" style={{ color: "var(--text-muted)" }}>reading…</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="state-indicator" title={`Signals: ${estimate.signals.join(", ") || "none"}`}>
+      <span className="state-indicator__pill">{STATE_PHRASING[estimate.state]}</span>
+      <span className="state-indicator__confidence">{Math.round(estimate.confidence * 100)}% confidence</span>
+    </div>
+  );
+}
+==== /mnt/data/jarvis/src/ui/components/StatusBar.tsx
+import React from "react";
+import type { MicStatus } from "../../types/voice";
+
+export interface StatusBarProps {
+  online: boolean;
+  aiAvailable: boolean;
+  micStatus: MicStatus;
+  cameraStatus: "unavailable" | "permission_denied" | "off" | "starting" | "on" | "error";
+  currentTask?: string;
+  /** Phase 2 additions — all optional so Phase 1 call sites keep compiling. */
+  browserActive?: boolean;
+  activeApplication?: string;
+  fileOperationStatus?: string;
+  /** Phase 3 */
+  speaking?: boolean;
+  /** Phase 7 productization pass — closes the "top bar" gap from
+   * PHASE-CONTINUITY.md by EXTENDING this existing component (spec's
+   * repeated instruction: reuse/extend, do not create a second UI shell)
+   * rather than building a parallel top-bar component. All optional so
+   * every existing call site (if any) keeps compiling unchanged. */
+  activeProviderName?: string;
+  onOpenSettings?: () => void;
+  onOpenDashboard?: () => void;
+  onOpenDesignStudio?: () => void;
+  onAskScreen?: () => void;
+  onToggleDebug?: () => void;
+  debugActive?: boolean;
+  /** Which top-level screen is currently showing — drives the pill nav's
+   * active-state highlight (reference screenshots show "Home" highlighted
+   * while on that screen). */
+  currentView?: "home" | "dashboard";
+  /** Text-based command entry — the SAME `routeVoiceCommand` a real STT
+   * transcript would feed (see voice/CommandRouter.ts), given as a real,
+   * always-available input rather than only a hidden test scaffold. This
+   * is also the honest way to exercise "voice command routing" in an
+   * environment (like this sandbox) where microphone hardware can't be
+   * verified — the ROUTING is real and tested either way; only the audio
+   * capture step differs. */
+  onCommandText?: (text: string) => void;
+}
+
+function Dot({ label, active, error }: { label: string; active: boolean; error?: boolean }) {
+  const cls = error ? "status-dot status-dot--error" : active ? "status-dot status-dot--active" : "status-dot";
+  return (
+    <div className={cls}>
+      <span className="status-dot__indicator" />
+      <span>{label}</span>
+    </div>
+  );
+}
+
+/** Spec section 7 requires these six states to be distinguishable at a
+ * glance: MIC OFF, MIC READY, LISTENING, PROCESSING, SPEAKING, ERROR. */
+function micLabel(status: StatusBarProps["micStatus"], speaking: boolean): string {
+  if (status === "error" || status === "permission_denied") return "MIC ERROR";
+  if (status === "unavailable") return "MIC OFF";
+  if (speaking) return "SPEAKING";
+  if (status === "listening") return "LISTENING";
+  if (status === "starting") return "LISTENING"; // real state, shown identically to LISTENING — the "starting" phase is milliseconds long and not worth a distinct label
+  if (status === "processing") return "PROCESSING";
+  return "MIC READY";
+}
+
+export function StatusBar({
+  online, aiAvailable, micStatus, cameraStatus, currentTask,
+  browserActive, activeApplication, fileOperationStatus, speaking,
+  activeProviderName, onOpenSettings, onOpenDashboard, onOpenDesignStudio, onAskScreen, onToggleDebug, debugActive, onCommandText,
+  currentView = "home",
+}: StatusBarProps) {
+  const [commandInput, setCommandInput] = React.useState("");
+  // Redesign (per the reference screenshots): a small corner gear for
+  // Settings, a centered pill nav for the app's real top-level screens,
+  // and everything else (the six-dot cluster, task/app/file-operation
+  // text, provider badge, raw command-text input, Debug) behind a details
+  // disclosure — same functionality as before, still not shown by default.
+  const [expanded, setExpanded] = React.useState(false);
+  const hasDetail = !!(currentTask || activeApplication || fileOperationStatus || activeProviderName || onCommandText || onToggleDebug);
+  const overallOk = online && aiAvailable && micStatus !== "error" && micStatus !== "permission_denied" && cameraStatus !== "error" && cameraStatus !== "permission_denied";
+
+  return (
+    <div className="glass-panel status-bar">
+      <div className="status-bar__row">
+        {onOpenSettings && <button className="status-bar__corner-icon" title="Settings" onClick={onOpenSettings}>⚙</button>}
+
+        <nav className="status-bar__pillnav">
+          <span className={`status-bar__pill ${currentView === "home" ? "status-bar__pill--active" : ""}`}>⌂ Home</span>
+          {onOpenDashboard && (
+            <button
+              className={`status-bar__pill status-bar__pill--btn ${currentView === "dashboard" ? "status-bar__pill--active" : ""}`}
+              onClick={onOpenDashboard}
+            >
+              ▦ Dashboard
+            </button>
+          )}
+          {onOpenDesignStudio && <button className="status-bar__pill status-bar__pill--btn" onClick={onOpenDesignStudio}>◈ 3D Viewport</button>}
+        </nav>
+
+        <div className="status-bar__spacer" />
+        <Dot label={overallOk ? "Nominal" : "Attention"} active={overallOk} error={!overallOk} />
+        {hasDetail && (
+          <button
+            className={`status-bar__icon-btn ${expanded ? "status-bar__icon-btn--active" : ""}`}
+            title="Details"
+            onClick={() => setExpanded((v) => !v)}
+          >
+            ⋯
+          </button>
+        )}
+      </div>
+
+      {expanded && (
+        <div className="status-bar__detail">
+          <div style={{ fontSize: 12, color: "var(--text-muted)", display: "flex", gap: 10 }}>
+            <span>{currentTask ?? "Idle"}</span>
+            {activeApplication && <span style={{ color: "var(--accent-cyan)" }}>· {activeApplication}</span>}
+            {fileOperationStatus && <span>· {fileOperationStatus}</span>}
+          </div>
+          <div className="status-cluster">
+            <Dot label="Network" active={online} />
+            <Dot label="AI" active={aiAvailable} error={!aiAvailable} />
+            {activeProviderName && <span className="status-bar__provider">{activeProviderName}</span>}
+            <Dot
+              label={micLabel(micStatus, !!speaking)}
+              active={micStatus === "listening" || micStatus === "starting" || micStatus === "processing" || !!speaking}
+              error={micStatus === "error" || micStatus === "permission_denied"}
+            />
+            <Dot label="Camera" active={cameraStatus === "on" || cameraStatus === "starting"} error={cameraStatus === "error" || cameraStatus === "permission_denied"} />
+            {browserActive !== undefined && <Dot label="Browser" active={browserActive} />}
+            {onAskScreen && <button className="status-bar__nav-btn" onClick={onAskScreen}>Ask Screen</button>}
+          </div>
+          {(onCommandText || onToggleDebug) && (
+            <nav className="status-bar__nav">
+              {onCommandText && (
+                <input
+                  className="status-bar__command-input"
+                  placeholder='Type a command… (e.g. "open settings")'
+                  value={commandInput}
+                  onChange={(e) => setCommandInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && commandInput.trim()) {
+                      onCommandText(commandInput);
+                      setCommandInput("");
+                    }
+                  }}
+                />
+              )}
+              {onToggleDebug && <button className={`status-bar__nav-btn ${debugActive ? "status-bar__nav-btn--active" : ""}`} onClick={onToggleDebug}>Debug</button>}
+            </nav>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+==== /mnt/data/jarvis/src/ui/components/TaskProgress.tsx
+import type { PlanReport } from "../../types/tool";
+
+interface Props {
+  plan: PlanReport;
+  onCancel: () => void;
+  running: boolean;
+}
+
+export function TaskProgress({ plan, onCancel, running }: Props) {
+  const pct = plan.total_steps === 0 ? 0 : Math.round((plan.completed_steps / plan.total_steps) * 100);
+
+  return (
+    <div className="glass-panel task-progress">
+      <div className="task-progress__header">
+        <span className="task-progress__label">Task Progress</span>
+        {running && (
+          <button className="task-progress__cancel" onClick={onCancel}>Cancel</button>
+        )}
+      </div>
+
+      <div className="task-progress__bar">
+        <div
+          className="task-progress__bar-fill"
+          style={{ width: `${pct}%`, background: plan.stopped_early && !running ? "var(--warning)" : "var(--accent-cyan)" }}
+        />
+      </div>
+
+      <div className="task-progress__summary">{plan.summary}</div>
+
+      {plan.outcomes.map((o, i) => (
+        <div key={i} className="task-progress__outcome">
+          <span>{i + 1}.</span>
+          <span>{describeOutcome(o)}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function describeOutcome(o: PlanReport["outcomes"][number]): string {
+  switch (o.status) {
+    case "Success": return o.message;
+    case "NeedsConfirmation": return `Waiting for confirmation: ${o.explanation.action}`;
+    case "Conflict": return `${o.destination} already exists — needs a decision`;
+    case "Failed": return `Failed: ${o.error}`;
+    case "Cancelled": return "Cancelled";
+    case "Skipped": return "Skipped";
+  }
+}
+==== /mnt/data/jarvis/src/ui/core/JarvisVisualizer.ts
+import * as THREE from "three";
+import type { JarvisState } from "../../orchestrator/JarvisStateMachine";
+
+/**
+ * # Status: UNVERIFIED (no WebGL context available in this sandbox).
+ *
+ * Layered energy-core built from additive-blended sprites, a particle
+ * shell, a wireframe icosahedron, an armillary-sphere ring set, and
+ * (added this session, once real reference screenshots were finally
+ * provided) 16 tapered-cone sunburst spikes radiating outward at random
+ * angles/lengths — the reference images' single most distinctive feature,
+ * previously missing entirely. Orange/gold core, cyan/teal reserved for
+ * surrounding HUD chrome (see global.css). Deliberately NOT using
+ * EffectComposer/UnrealBloomPass: real bloom post-processing needs an
+ * opaque render target, which fights this visualizer's transparent
+ * background requirement (it's composited over the Home command-center
+ * UI, not over a solid canvas). Additive blending on a transparent clear
+ * color gives the same "glowing energy" read without that tradeoff.
+ *
+ * Public API (mount/dispose/setState/setAudioLevel/resize-on-observe) is
+ * UNCHANGED, so JarvisVisualizerView and every caller keep working without
+ * modification.
+ *
+ * Each `JarvisState` still gets genuinely distinct behavior — see
+ * `updateAnimation`'s per-case comments. `setAudioLevel` is only ever fed
+ * real microphone amplitude by the caller (see JarvisVisualizerView) —
+ * this class has no synthesized fallback for it.
+ */
+export class JarvisVisualizer {
+  readonly scene: THREE.Scene;
+  readonly camera: THREE.PerspectiveCamera;
+  private renderer: THREE.WebGLRenderer | null = null;
+
+  private coreGroup: THREE.Group;
+  private coreWire: THREE.LineSegments;
+  private haloSprite: THREE.Sprite;
+  private midSprite: THREE.Sprite;
+  private hotSprite: THREE.Sprite;
+  private shellPoints: THREE.Points;
+  private shellMaterial: THREE.PointsMaterial;
+  private rings: THREE.Mesh[] = [];
+  private spikes: THREE.Mesh[] = [];
+  private dust: THREE.Points;
+
+  private animationHandle: number | null = null;
+  private disposed = false;
+  private state: JarvisState = "IDLE";
+  private audioLevel = 0; // 0..1, see setAudioLevel
+  private elapsed = 0;
+  private resizeObserver: ResizeObserver | null = null;
+
+  // Smoothed color the whole core lerps toward each frame, so state
+  // changes read as a deliberate transition rather than an abrupt snap.
+  private targetColor = new THREE.Color(0xff9d4d);
+  private currentColor = new THREE.Color(0xff9d4d);
+
+  constructor() {
+    this.scene = new THREE.Scene();
+    this.camera = new THREE.PerspectiveCamera(42, 1, 0.1, 100);
+    this.camera.position.set(0, 0, 4.6);
+
+    this.coreGroup = new THREE.Group();
+    this.scene.add(this.coreGroup);
+
+    // --- soft glow sprites (halo -> mid -> hot core), additive-blended ---
+    const glowTex = JarvisVisualizer.makeGlowTexture();
+    this.haloSprite = new THREE.Sprite(
+      new THREE.SpriteMaterial({ map: glowTex, color: 0xb35a10, transparent: true, opacity: 0.35, blending: THREE.AdditiveBlending, depthWrite: false })
+    );
+    this.haloSprite.scale.set(3.4, 3.4, 1);
+    this.midSprite = new THREE.Sprite(
+      new THREE.SpriteMaterial({ map: glowTex, color: 0xff9d4d, transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending, depthWrite: false })
+    );
+    this.midSprite.scale.set(1.7, 1.7, 1);
+    this.hotSprite = new THREE.Sprite(
+      new THREE.SpriteMaterial({ map: glowTex, color: 0xfff0d8, transparent: true, opacity: 0.85, blending: THREE.AdditiveBlending, depthWrite: false })
+    );
+    this.hotSprite.scale.set(0.68, 0.68, 1);
+    this.coreGroup.add(this.haloSprite, this.midSprite, this.hotSprite);
+
+    // --- crystalline wireframe core sitting inside the glow: gives the
+    // orb a "machine" identity rather than reading as a pure blob of light ---
+    const wireGeo = new THREE.IcosahedronGeometry(0.62, 1);
+    const edges = new THREE.EdgesGeometry(wireGeo);
+    this.coreWire = new THREE.LineSegments(
+      edges,
+      new THREE.LineBasicMaterial({ color: 0xffd9a0, transparent: true, opacity: 0.55 })
+    );
+    this.coreGroup.add(this.coreWire);
+
+    // --- particle shell: a loose cloud of points around the core ---
+    const shellCount = 900;
+    const positions = new Float32Array(shellCount * 3);
+    const seeds = new Float32Array(shellCount); // per-particle phase for organic drift
+    for (let i = 0; i < shellCount; i++) {
+      const radius = THREE.MathUtils.lerp(0.9, 1.9, Math.pow(Math.random(), 1.6));
+      const theta = Math.random() * Math.PI * 2;
+      const phi = Math.acos(THREE.MathUtils.randFloatSpread(2));
+      const i3 = i * 3;
+      positions[i3] = radius * Math.sin(phi) * Math.cos(theta);
+      positions[i3 + 1] = radius * Math.sin(phi) * Math.sin(theta);
+      positions[i3 + 2] = radius * Math.cos(phi);
+      seeds[i] = Math.random() * Math.PI * 2;
+    }
+    const shellGeo = new THREE.BufferGeometry();
+    shellGeo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    shellGeo.setAttribute("seed", new THREE.BufferAttribute(seeds, 1));
+    this.shellMaterial = new THREE.PointsMaterial({
+      color: 0xffb066, size: 0.028, map: glowTex, transparent: true, opacity: 0.55,
+      blending: THREE.AdditiveBlending, depthWrite: false, sizeAttenuation: true,
+    });
+    this.shellPoints = new THREE.Points(shellGeo, this.shellMaterial);
+    this.coreGroup.add(this.shellPoints);
+
+    // --- thin gyroscopic rings, each tilted on a different axis: a denser
+    // "armillary sphere" set (was 3, now 5) to match the reference
+    // screenshots' layered great-circle look more closely ---
+    for (let i = 0; i < 5; i++) {
+      const ringGeometry = new THREE.TorusGeometry(1.05 + i * 0.22, 0.006, 8, 96);
+      const ringMaterial = new THREE.MeshBasicMaterial({
+        color: 0xff9d4d, transparent: true, opacity: 0.26 - i * 0.035,
+        blending: THREE.AdditiveBlending, depthWrite: false,
+      });
+      const ring = new THREE.Mesh(ringGeometry, ringMaterial);
+      ring.rotation.x = Math.PI / 2 + i * 0.42;
+      ring.rotation.y = i * 0.31;
+      this.rings.push(ring);
+      this.coreGroup.add(ring);
+    }
+
+    // --- sunburst spikes: the reference screenshots' single most
+    // distinctive feature — long thin rays shooting outward from the core
+    // at irregular angles/lengths, like a lens flare. Built from tapered
+    // cone geometry (naturally comes to a point, no gradient texture
+    // needed) rather than plain lines, since WebGL line width/alpha-taper
+    // support is inconsistent across browsers/platforms. */
+    const spikeCount = 16;
+    for (let i = 0; i < spikeCount; i++) {
+      const dir = new THREE.Vector3(
+        THREE.MathUtils.randFloatSpread(2),
+        THREE.MathUtils.randFloatSpread(2),
+        THREE.MathUtils.randFloatSpread(2),
+      ).normalize();
+      const length = THREE.MathUtils.lerp(1.0, 2.4, Math.random());
+      const baseRadius = THREE.MathUtils.lerp(0.012, 0.026, Math.random());
+      const geo = new THREE.ConeGeometry(baseRadius, length, 5);
+      const mat = new THREE.MeshBasicMaterial({
+        color: 0xffb066, transparent: true, opacity: 0.4,
+        blending: THREE.AdditiveBlending, depthWrite: false,
+      });
+      const spike = new THREE.Mesh(geo, mat);
+      spike.position.copy(dir).multiplyScalar(0.5 + length / 2);
+      spike.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
+      this.spikes.push(spike);
+      this.coreGroup.add(spike);
+    }
+
+    // --- faint background dust for depth; sparse enough to never compete
+    // with the core (spec's "no unnecessary decorative clutter") ---
+    const dustCount = 260;
+    const dustPos = new Float32Array(dustCount * 3);
+    for (let i = 0; i < dustCount; i++) {
+      const i3 = i * 3;
+      dustPos[i3] = THREE.MathUtils.randFloatSpread(9);
+      dustPos[i3 + 1] = THREE.MathUtils.randFloatSpread(9);
+      dustPos[i3 + 2] = THREE.MathUtils.randFloatSpread(6) - 2;
+    }
+    const dustGeo = new THREE.BufferGeometry();
+    dustGeo.setAttribute("position", new THREE.BufferAttribute(dustPos, 3));
+    this.dust = new THREE.Points(
+      dustGeo,
+      new THREE.PointsMaterial({ color: 0x2c6fa8, size: 0.016, map: glowTex, transparent: true, opacity: 0.3, blending: THREE.AdditiveBlending, depthWrite: false, sizeAttenuation: true })
+    );
+    this.scene.add(this.dust);
+
+    const point = new THREE.PointLight(0xffab5e, 6, 6, 2);
+    this.coreGroup.add(point);
+  }
+
+  /** Soft radial-gradient sprite texture shared by every glow element and
+   * the point clouds — one canvas, reused everywhere via material.map. */
+  private static makeGlowTexture(): THREE.CanvasTexture {
+    const size = 128;
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = size;
+    const ctx = canvas.getContext("2d")!;
+    const gradient = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+    gradient.addColorStop(0, "rgba(255,255,255,1)");
+    gradient.addColorStop(0.25, "rgba(210,245,255,0.9)");
+    gradient.addColorStop(0.55, "rgba(78,225,255,0.35)");
+    gradient.addColorStop(1, "rgba(46,124,246,0)");
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, size, size);
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.needsUpdate = true;
+    return tex;
+  }
+
+  setState(state: JarvisState): void {
+    this.state = state;
+  }
+
+  /**
+   * Feeds real audio amplitude (0..1) for LISTENING. NEVER called with a
+   * synthesized/fake value when no real microphone is producing audio — per
+   * spec section 9's explicit "do not fake actual microphone audio when no
+   * microphone exists." When no real source is available, callers should
+   * simply not call this method (it defaults to 0, producing a calm/minimal
+   * ring animation). SPEAKING intentionally does NOT use this: the Web
+   * Speech TTS engine exposes no audio buffer to sample from, so SPEAKING's
+   * pulse is driven by elapsed time instead of a fabricated level.
+   */
+  setAudioLevel(level: number): void {
+    this.audioLevel = Math.max(0, Math.min(1, level));
+  }
+
+  mount(container: HTMLElement): void {
+    if (this.renderer) throw new Error("JarvisVisualizer already mounted — call dispose() first.");
+    this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    this.renderer.setClearColor(0x000000, 0);
+==== /mnt/data/jarvis/src/ui/core/JarvisVisualizerView.tsx
+import { useEffect, useRef } from "react";
+import { JarvisVisualizer } from "./JarvisVisualizer";
+import type { JarvisState } from "../../orchestrator/JarvisStateMachine";
+
+interface Props {
+  state: JarvisState;
+  /** Real live AnalyserNode from an actual microphone stream (see App.tsx's
+   * push-to-talk handlers), or null/undefined when no mic is active. Never
+   * pass a synthesized AnalyserNode here — see JarvisVisualizer.setAudioLevel's
+   * doc comment on why. */
+  analyser?: AnalyserNode | null;
+}
+
+export function JarvisVisualizerView({ state, analyser }: Props) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const visualizerRef = useRef<JarvisVisualizer | null>(null);
+  const rafRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    const visualizer = new JarvisVisualizer();
+    visualizer.mount(container);
+    visualizerRef.current = visualizer;
+    return () => {
+      visualizer.dispose();
+      visualizerRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    visualizerRef.current?.setState(state);
+  }, [state]);
+
+  // Samples the real analyser at animation-frame rate and pushes the level
+  // straight into the visualizer instance (imperative — bypasses React
+  // state entirely) so mic-reactive motion never triggers a 60fps re-render
+  // of the surrounding Home UI.
+  useEffect(() => {
+    if (rafRef.current !== null) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
+    if (!analyser) {
+      visualizerRef.current?.setAudioLevel(0);
+      return;
+    }
+    const data = new Uint8Array(analyser.frequencyBinCount);
+    const sample = () => {
+      analyser.getByteTimeDomainData(data);
+      let sumSquares = 0;
+      for (let i = 0; i < data.length; i++) {
+        const centered = (data[i] - 128) / 128;
+        sumSquares += centered * centered;
+      }
+      const rms = Math.sqrt(sumSquares / data.length);
+      visualizerRef.current?.setAudioLevel(Math.min(1, rms * 4));
+      rafRef.current = requestAnimationFrame(sample);
+    };
+    rafRef.current = requestAnimationFrame(sample);
+    return () => {
+      if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    };
+  }, [analyser]);
+
+  return <div ref={containerRef} className="jarvis-visualizer" />;
+}
+==== /mnt/data/jarvis/src/ui/dashboard/Dashboard.tsx
+import { useMemo, useState } from "react";
+import type { CSSProperties } from "react";
+import type { JarvisState } from "../../orchestrator/JarvisStateMachine";
+import type { ActivityEntry } from "../../orchestrator/ActivityLog";
+import type { HandObservation, FaceObservation, PoseObservation, StateEstimate, GestureLabel } from "../../types/perception";
+
+interface Props {
+  onExit: () => void;
+  onOpenDesignStudio: () => void;
+  onOpenSettings: () => void;
+  cameraStatus: "unavailable" | "permission_denied" | "off" | "starting" | "on" | "error";
+  onStartCamera: () => void;
+  hands: HandObservation[];
+  faceObservation: FaceObservation | null;
+  poseObservation: PoseObservation | null;
+  gesture: GestureLabel | null;
+  jarvisState: JarvisState;
+  stateEstimate: StateEstimate | null;
+  activityEntries: ActivityEntry[];
+  isOnline: boolean;
+  aiAvailable: boolean;
+  activeProviderName: string | null;
+}
+
+function Icon({ name }: { name: string }) {
+  const paths: Record<string, string> = {
+    brain: "M9.5 4.5a3 3 0 0 0-5.7 1.3A3.2 3.2 0 0 0 4 12a3 3 0 0 0 1.5 5.5h.5a3 3 0 0 0 5.5 1.2 3 3 0 0 0 5.5-1.2h.5A3 3 0 0 0 19 12a3.2 3.2 0 0 0 .2-6.2A3 3 0 0 0 13.5 4a3 3 0 0 0-4 0Z",
+    phone: "M7 2.8h10A1.8 1.8 0 0 1 18.8 4.6v14.8a1.8 1.8 0 0 1-1.8 1.8H7a1.8 1.8 0 0 1-1.8-1.8V4.6A1.8 1.8 0 0 1 7 2.8Zm3 16h4",
+    spark: "m12 2 1.4 5.6L19 9l-5.6 1.4L12 16l-1.4-5.6L5 9l5.6-1.4L12 2Zm6.5 13 .6 2.4L21.5 18l-2.4.6-.6 2.4-.6-2.4-2.4-.6 2.4-.6.6-2.4Z",
+    cube: "m12 2.8 8 4.5v9.4l-8 4.5-8-4.5V7.3l8-4.5Zm0 0v9m8-4.5-8 4.5-8-4.5",
+    shield: "M12 2.7 20 6v5.4c0 5.1-3.3 8.6-8 10-4.7-1.4-8-4.9-8-10V6l8-3.3Z",
+  };
+  return <svg viewBox="0 0 24 24" aria-hidden="true"><path d={paths[name] ?? paths.spark} fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" /></svg>;
+}
+
+function QrCode({ value }: { value: string }) {
+  const src = `https://api.qrserver.com/v1/create-qr-code/?size=320x320&margin=10&data=${encodeURIComponent(value)}`;
+  return <img className="jarvis-qr" src={src} alt="JARVIS phone pairing QR code" loading="eager" />;
+}
+
+export function Dashboard({
+  onExit, onOpenDesignStudio, onOpenSettings,
+  cameraStatus, onStartCamera, hands, faceObservation, poseObservation, gesture,
+  jarvisState, stateEstimate, activityEntries, isOnline, aiAvailable, activeProviderName,
+}: Props) {
+  const [showPairing, setShowPairing] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [sessionId] = useState(() => crypto.randomUUID().slice(0, 8).toUpperCase());
+  const pairUrl = useMemo(() => `${window.location.origin}${window.location.pathname}?pair=${sessionId}`, [sessionId]);
+  const recentActivity = activityEntries.slice(-7).reverse();
+  const confidence = stateEstimate ? Math.round(stateEstimate.confidence * 100) : 0;
+
+  const copyPairLink = async () => {
+    try {
+      await navigator.clipboard.writeText(pairUrl);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1600);
+    } catch { /* clipboard can be unavailable in insecure contexts */ }
+  };
+
+  return (
+    <div className="jarvis-dashboard">
+      <div className="dashboard-ambient dashboard-ambient--one" />
+      <div className="dashboard-ambient dashboard-ambient--two" />
+
+      <header className="dashboard-topbar">
+        <button className="dashboard-brand" onClick={onExit} title="Return to JARVIS core">
+          <span className="dashboard-brand__orb"><Icon name="brain" /></span>
+          <span><b>JARVIS</b><small>NEURAL COMMAND CENTER</small></span>
+        </button>
+        <div className="dashboard-topbar__status">
+          <span className={`live-dot ${isOnline ? "live-dot--on" : ""}`} />
+          {isOnline ? "ONLINE" : "OFFLINE"}
+          <span className="dashboard-clock">SESSION {sessionId}</span>
+        </div>
+        <div className="dashboard-topbar__actions">
+          <button onClick={() => setShowPairing(true)}><Icon name="phone" /> CONNECT</button>
+          <button onClick={onOpenSettings}>SETTINGS</button>
+        </div>
+      </header>
+
+      <main className="dashboard-content">
+        <section className="dashboard-hero hud-frame">
+          <div className="dashboard-hero__copy">
+            <span className="eyebrow">COGNITIVE OPERATING SYSTEM</span>
+            <h1>Your command center,<br /><em>fully aware.</em></h1>
+            <p>Voice, vision, memory, AI providers and creative tools unified into one live JARVIS core.</p>
+            <div className="dashboard-hero__actions">
+              <button className="primary-action" onClick={onExit}><Icon name="spark" /> Open Core</button>
+              <button className="secondary-action" onClick={onOpenDesignStudio}><Icon name="cube" /> 3D Studio</button>
+            </div>
+          </div>
+          <div className="dashboard-core-ring">
+            <div className="core-ring__orbit core-ring__orbit--a" />
+            <div className="core-ring__orbit core-ring__orbit--b" />
+            <div className="core-ring__center"><Icon name="brain" /><strong>{jarvisState}</strong><span>{activeProviderName ?? "NO PROVIDER"}</span></div>
+          </div>
+        </section>
+
+        <section className="metric-row">
+          <article className="metric-card"><span>CORE STATE</span><strong>{jarvisState}</strong><small>Live state machine</small></article>
+          <article className="metric-card"><span>AI PROVIDER</span><strong>{activeProviderName ?? "UNCONFIGURED"}</strong><small>{aiAvailable ? "Ready for requests" : "Needs configuration"}</small></article>
+          <article className="metric-card"><span>VISION</span><strong>{cameraStatus === "on" ? "ACTIVE" : "STANDBY"}</strong><small>{hands.length} hands · {poseObservation?.detected ? "pose" : "no pose"}</small></article>
+          <article className="metric-card"><span>NETWORK</span><strong>{isOnline ? "CONNECTED" : "OFFLINE"}</strong><small>Browser connectivity</small></article>
+        </section>
+
+        <div className="dashboard-grid dashboard-grid--pro">
+          <section className="dashboard-card dashboard-card--wide hud-frame">
+            <div className="card-heading"><div><span className="card-kicker">NEURAL TELEMETRY</span><h2>Cognitive state</h2></div><span className="status-chip">LIVE</span></div>
+            <div className="telemetry-body">
+              <div className="confidence-ring" style={{ "--progress": `${confidence * 3.6}deg` } as CSSProperties}><b>{confidence}%</b><span>confidence</span></div>
+              <div className="telemetry-facts">
+                <div><span>Fused state</span><b>{stateEstimate?.state ?? "Waiting for signals"}</b></div>
+                <div><span>Signal sources</span><b>{stateEstimate?.signals.length ?? 0}</b></div>
+                <div><span>Face</span><b>{faceObservation?.detected ? `${Math.round(faceObservation.confidence * 100)}% detected` : "Not detected"}</b></div>
+                <div><span>Gesture</span><b>{gesture ?? "None"}</b></div>
+              </div>
+            </div>
+          </section>
+
+          <section className="dashboard-card hud-frame">
+            <div className="card-heading"><div><span className="card-kicker">PERCEPTION</span><h2>Vision stack</h2></div><span className="module-icon"><Icon name="spark" /></span></div>
+            <div className="stack-list">
+              <div><span>Camera</span><b className={cameraStatus === "on" ? "good" : "muted"}>{cameraStatus.toUpperCase()}</b></div>
+              <div><span>Hands</span><b>{hands.length}</b></div>
+              <div><span>Face model</span><b>{faceObservation?.detected ? "TRACKING" : "READY"}</b></div>
+              <div><span>Pose model</span><b>{poseObservation?.detected ? "TRACKING" : "READY"}</b></div>
+            </div>
+            {cameraStatus !== "on" && <button className="card-button" onClick={onStartCamera}>Initialize camera</button>}
+          </section>
+
+          <section className="dashboard-card hud-frame">
+            <div className="card-heading"><div><span className="card-kicker">SECURITY</span><h2>Guard rails</h2></div><span className="module-icon"><Icon name="shield" /></span></div>
+            <div className="security-score"><div><strong>LOCAL</strong><span>keys + memory controls</span></div><i>●</i></div>
+            <p className="card-note">Sensitive actions remain confirmation-gated. Provider keys stay outside normal settings data.</p>
+            <button className="card-button" onClick={onOpenSettings}>Review security</button>
+          </section>
+
+          <section className="dashboard-card dashboard-card--wide hud-frame">
+            <div className="card-heading"><div><span className="card-kicker">ACTIVITY STREAM</span><h2>What JARVIS is doing</h2></div><span className="status-chip status-chip--dim">{recentActivity.length} EVENTS</span></div>
+            {recentActivity.length === 0 ? <div className="empty-stream">No activity yet. Use the core to start a task.</div> : <div className="activity-stream">{recentActivity.map((entry) => <div className="activity-item" key={entry.id}><span className={`activity-dot activity-dot--${entry.status}`} /><div><b>{entry.requestText}</b><small>{entry.interpretedIntent ?? "command"}</small></div><em>{entry.status.replace(/_/g, " ")}</em></div>)}</div>}
+          </section>
+        </div>
+
+        <section className="quick-actions">
+          <button onClick={() => setShowPairing(true)}><Icon name="phone" /><span>Pair phone</span><small>QR + session link</small></button>
+          <button onClick={onOpenDesignStudio}><Icon name="cube" /><span>Open 3D studio</span><small>Design workspace</small></button>
+          <button onClick={onOpenSettings}><Icon name="shield" /><span>AI & security</span><small>Providers + permissions</small></button>
+          <button onClick={onExit}><Icon name="spark" /><span>Talk to JARVIS</span><small>Voice + chat core</small></button>
+        </section>
+      </main>
+
+      {showPairing && <div className="pairing-overlay" role="dialog" aria-modal="true">
+        <div className="pairing-modal hud-frame">
+          <button className="pairing-close" onClick={() => setShowPairing(false)}>×</button>
+          <div className="pairing-copy"><span className="eyebrow">SECURE DEVICE PAIRING</span><h2>Connect a phone to JARVIS</h2><p>Scan this QR code on the phone. The code contains a short-lived session identifier and opens the JARVIS companion route on this host.</p></div>
+          <div className="pairing-qr-wrap"><QrCode value={pairUrl} /><span>SESSION {sessionId}</span></div>
+          <div className="pairing-link"><input readOnly value={pairUrl} /><button onClick={copyPairLink}>{copied ? "COPIED" : "COPY"}</button></div>
+          <small className="pairing-note">For true cross-device live control, deploy the companion/signaling backend and configure its environment variables. This UI never pretends a phone is connected until a real handshake exists.</small>
+        </div>
+      </div>}
+    </div>
+  );
+}
+==== /mnt/data/jarvis/src/ui/design3d/ComponentLibraryPanel.tsx
+import type { ComponentType } from "../../design3d/types";
+
+const CATEGORIES: Record<string, ComponentType[]> = {
+  Armor: ["armor_plate", "panel", "bevelled_panel"],
+  Mechanical: ["joint", "hinge", "connector", "handle", "mount"],
+  Energy: ["core", "emitter", "lens"],
+  Structural: ["box", "cylinder", "sphere", "cone", "capsule", "ring", "tube"],
+  Utility: ["vent", "grille"],
+};
+
+export function ComponentLibraryPanel({ onAdd }: { onAdd: (type: ComponentType) => void }) {
+  return (
+    <div className="glass-panel studio-left">
+      {Object.entries(CATEGORIES).map(([category, types]) => (
+        <div key={category}>
+          <div className="studio-panel-title">{category}</div>
+          {types.map((t) => (
+            <div key={t} className="studio-lib-item" onClick={() => onAdd(t)}>
+              <ComponentIcon />
+              {t.replace(/_/g, " ")}
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ComponentIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ opacity: 0.6, flexShrink: 0 }}>
+      <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+    </svg>
+  );
+}
+==== /mnt/data/jarvis/src/ui/design3d/DesignStudio.tsx
+import React, { useCallback, useRef, useState } from "react";
+import { DesignController } from "../../design3d/commands/DesignController";
+import { generateComponentParameters } from "../../design3d/generators/componentDefaults";
+import type { ComponentType } from "../../design3d/types";
+import { Viewport, type ViewportHandle } from "./Viewport";
+import { ComponentLibraryPanel } from "./ComponentLibraryPanel";
+import { InspectorPanel } from "./InspectorPanel";
+import { StudioTopBar } from "./StudioTopBar";
+import { HistoryBar } from "./HistoryBar";
+import { ARView } from "../ar/ARView";
+import type { VisionPipeline } from "../../vision/VisionPipeline";
+
+interface Props {
+  onExit: () => void;
+  onSaveProject: (name: string, controller: DesignController) => Promise<void>;
+  /** Reused from the main Assistant view's Phase 3 camera pipeline — see
+   * ARView's doc comment. Both may be null if the camera was never
+   * started; the AR toggle only appears once a stream is available,
+   * rather than implying AR works with no camera at all. */
+  visionPipeline: VisionPipeline | null;
+  cameraStream: MediaStream | null;
+}
+
+let objectCounter = 0;
+function nextObjectId(type: ComponentType): string {
+  objectCounter += 1;
+  return `${type}_${objectCounter}`;
+}
+
+export function DesignStudio({ onExit, onSaveProject, visionPipeline, cameraStream }: Props) {
+  // One controller per studio session — created once, lives for the
+  // studio's lifetime, disposed implicitly when the component unmounts
+  // (the controller itself holds no browser resources; only Viewport's
+  // SceneManager/GraphRenderer do, and those clean up in their own effect).
+  const controllerRef = useRef(new DesignController());
+  const viewportRef = useRef<ViewportHandle>(null);
+  const [projectName, setProjectName] = useState("Untitled Design");
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [wireframe, setWireframe] = useState(false);
+  const [syncToken, setSyncToken] = useState(0);
+  const [arMode, setArMode] = useState(false);
+  const bump = useCallback(() => setSyncToken((t) => t + 1), []);
+
+  const handleAddComponent = useCallback((type: ComponentType) => {
+    const { parameters, errors } = generateComponentParameters(type);
+    if (errors.length > 0) {
+      console.warn("Generated parameters failed validation (should not happen for defaults):", errors);
+      return;
+    }
+    const id = nextObjectId(type);
+    const result = controllerRef.current.apply({
+      type: "CREATE_OBJECT", objectId: id, componentType: type, parameters,
+      parentId: selectedId ?? null, // new components nest under the current selection, if any — matches "add three energy emitters" to the currently-selected gauntlet
+    });
+    if (result.success) {
+      setSelectedId(id);
+      bump();
+    }
+  }, [selectedId, bump]);
+
+  const handleUndo = useCallback(() => { controllerRef.current.undo(); bump(); }, [bump]);
+  const handleRedo = useCallback(() => { controllerRef.current.redo(); bump(); }, [bump]);
+  const handleReset = useCallback(() => {
+    if (!window.confirm("Reset the design? This clears all objects and history.")) return;
+    controllerRef.current.reset();
+    setSelectedId(null);
+    bump();
+  }, [bump]);
+  const handleSave = useCallback(async () => {
+    await onSaveProject(projectName, controllerRef.current);
+  }, [projectName, onSaveProject]);
+
+  // Keyboard shortcuts — Ctrl+Z / Ctrl+Y per spec section 14.
+  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") { e.preventDefault(); handleUndo(); }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y") { e.preventDefault(); handleRedo(); }
+  }, [handleUndo, handleRedo]);
+
+  return (
+    <div className="studio-shell" tabIndex={0} onKeyDown={handleKeyDown}>
+      <StudioTopBar
+        projectName={projectName}
+        onProjectNameChange={setProjectName}
+        onSave={handleSave}
+        onUndo={handleUndo}
+        onRedo={handleRedo}
+        canUndo={controllerRef.current.history.canUndo()}
+        canRedo={controllerRef.current.history.canRedo()}
+        onReset={handleReset}
+        onResetCamera={() => viewportRef.current?.resetCamera()}
+        wireframe={wireframe}
+        onToggleWireframe={() => setWireframe((w) => !w)}
+        onExit={onExit}
+        arAvailable={!!(visionPipeline && cameraStream)}
+        onToggleAR={() => setArMode((a) => !a)}
+      />
+      <ComponentLibraryPanel onAdd={handleAddComponent} />
+      {arMode && visionPipeline && cameraStream ? (
+        <ARView
+          designController={controllerRef.current}
+          visionPipeline={visionPipeline}
+          cameraStream={cameraStream}
+          selectedDesignObjectId={selectedId}
+          onExit={() => setArMode(false)}
+        />
+      ) : (
+        <Viewport
+          ref={viewportRef}
+          controller={controllerRef.current}
+          selectedId={selectedId}
+          onSelect={setSelectedId}
+          wireframe={wireframe}
+          syncToken={syncToken}
+        />
+      )}
+      <InspectorPanel controller={controllerRef.current} selectedId={selectedId} onChange={bump} />
+      <HistoryBar controller={controllerRef.current} syncToken={syncToken} viewportRef={viewportRef} />
+    </div>
+  );
+}
+==== /mnt/data/jarvis/src/ui/design3d/HistoryBar.tsx
+import React from "react";
+import type { DesignController } from "../../design3d/commands/DesignController";
+import type { ViewportHandle } from "./Viewport";
+
+/** Minimal for Phase 4 — shows undo/redo depth plus real renderer stats
+ * (draw calls / triangles) sourced from Three.js's own `renderer.info`,
+ * never fabricated. A full scrubbable timeline (spec section 5's "bottom:
+ * timeline/history/action area where useful") is a reasonable follow-up
+ * once real usage patterns show what's actually useful to display there. */
+export function HistoryBar({ controller, viewportRef }: { controller: DesignController; syncToken: number; viewportRef: React.RefObject<ViewportHandle> }) {
+  const info = viewportRef.current?.getRendererInfo();
+  return (
+    <div className="glass-panel studio-bottom" style={{ padding: "8px 14px", fontSize: 11.5, color: "var(--text-muted)", display: "flex", gap: 16 }}>
+      <span>{controller.graph.size} object{controller.graph.size === 1 ? "" : "s"}</span>
+      <span>{controller.history.undoCount} undoable step{controller.history.undoCount === 1 ? "" : "s"}</span>
+      <span>{controller.history.redoCount} redoable step{controller.history.redoCount === 1 ? "" : "s"}</span>
+      {info && <span>{info.drawCalls} draw calls</span>}
+      {info && <span>{info.triangles.toLocaleString()} triangles</span>}
+    </div>
+  );
+}
+==== /mnt/data/jarvis/src/ui/design3d/InspectorPanel.tsx
+import type { DesignController } from "../../design3d/commands/DesignController";
+import { MATERIAL_PRESETS, listMaterialPresets } from "../../design3d/materials/presets";
+import type { MaterialPresetName } from "../../design3d/types";
+
+interface Props {
+  controller: DesignController;
+  selectedId: string | null;
+  onChange: () => void; // bumps the parent's syncToken after a mutation
+}
+
+/**
+ * Every field here calls `controller.apply(...)` — the SAME DesignCommand
+ * pathway the AI translation layer uses. This is what spec section 19
+ * means by "do not create a separate mutation pathway that bypasses
+ * history": dragging a number in this panel produces a real, undoable
+ * MOVE_OBJECT/UPDATE_OBJECT/SET_MATERIAL command, not a direct graph write.
+ */
+export function InspectorPanel({ controller, selectedId, onChange }: Props) {
+  const obj = selectedId ? controller.graph.get(selectedId) : undefined;
+
+  if (!obj) {
+    return (
+      <div className="glass-panel studio-right">
+        <div className="studio-empty">Select an object to inspect it.</div>
+      </div>
+    );
+  }
+
+  const setPosition = (axis: "x" | "y" | "z", value: number) => {
+    if (!Number.isFinite(value)) return;
+    const next = { ...obj.transform.position, [axis]: value };
+    controller.apply({ type: "MOVE_OBJECT", objectId: obj.id, position: next });
+    onChange();
+  };
+  const setRotation = (axis: "x" | "y" | "z", value: number) => {
+    if (!Number.isFinite(value)) return;
+    const next = { ...obj.transform.rotation, [axis]: value };
+    controller.apply({ type: "ROTATE_OBJECT", objectId: obj.id, rotation: next });
+    onChange();
+  };
+  const setScale = (axis: "x" | "y" | "z", value: number) => {
+    if (!Number.isFinite(value) || value <= 0) return;
+    const next = { ...obj.transform.scale, [axis]: value };
+    controller.apply({ type: "SCALE_OBJECT", objectId: obj.id, scale: next });
+    onChange();
+  };
+  const setColor = (hex: string) => {
+    if (!/^#[0-9a-fA-F]{6}$/.test(hex)) return;
+    controller.apply({ type: "SET_COLOR", objectId: obj.id, color: hex });
+    onChange();
+  };
+  const applyPreset = (preset: MaterialPresetName) => {
+    controller.apply({ type: "SET_MATERIAL", objectId: obj.id, material: MATERIAL_PRESETS[preset] });
+    onChange();
+  };
+  const setParameter = (key: string, value: number) => {
+    if (!Number.isFinite(value)) return;
+    controller.apply({ type: "UPDATE_OBJECT", objectId: obj.id, parameters: { ...obj.parameters, [key]: value } });
+    onChange();
+  };
+
+  return (
+    <div className="glass-panel studio-right">
+      <div className="studio-panel-title">Object</div>
+      <div className="inspector-field"><label>Name</label><input value={obj.name} readOnly /></div>
+      <div className="inspector-field"><label>Type</label><input value={obj.type} readOnly /></div>
+
+      <div className="studio-panel-title">Position</div>
+      <div className="inspector-row">
+        {(["x", "y", "z"] as const).map((axis) => (
+          <div className="inspector-field" key={axis}>
+            <label>{axis.toUpperCase()}</label>
+            <input type="number" step="0.01" value={obj.transform.position[axis]} onChange={(e) => setPosition(axis, parseFloat(e.target.value))} />
+          </div>
+        ))}
+      </div>
+
+      <div className="studio-panel-title">Rotation (deg)</div>
+      <div className="inspector-row">
+        {(["x", "y", "z"] as const).map((axis) => (
+          <div className="inspector-field" key={axis}>
+            <label>{axis.toUpperCase()}</label>
+            <input type="number" step="1" value={obj.transform.rotation[axis]} onChange={(e) => setRotation(axis, parseFloat(e.target.value))} />
+          </div>
+        ))}
+      </div>
+
+      <div className="studio-panel-title">Scale</div>
+      <div className="inspector-row">
+        {(["x", "y", "z"] as const).map((axis) => (
+          <div className="inspector-field" key={axis}>
+            <label>{axis.toUpperCase()}</label>
+            <input type="number" step="0.1" min="0.001" value={obj.transform.scale[axis]} onChange={(e) => setScale(axis, parseFloat(e.target.value))} />
+          </div>
+        ))}
+      </div>
+
+      <div className="studio-panel-title">Material</div>
+      <div className="inspector-field">
+        <label>Base Color</label>
+        <input type="color" value={obj.material.baseColor} onChange={(e) => setColor(e.target.value)} />
+      </div>
+      <div className="inspector-field">
+        <label>Preset</label>
+        <select
+          style={{ background: "rgba(255,255,255,0.04)", border: "1px solid var(--border-glass)", borderRadius: 5, color: "var(--text-primary)", padding: "5px 8px", fontSize: 12.5 }}
+          onChange={(e) => applyPreset(e.target.value as MaterialPresetName)}
+          value=""
+        >
+          <option value="" disabled>Apply preset…</option>
+          {listMaterialPresets().map((p) => <option key={p} value={p}>{p.replace(/_/g, " ")}</option>)}
+        </select>
+      </div>
+
+      <div className="studio-panel-title">Parameters</div>
+      {Object.entries(obj.parameters).map(([key, value]) => (
+        typeof value === "number" ? (
+          <div className="inspector-field" key={key}>
+            <label>{key}</label>
+            <input type="number" step="0.005" value={value} onChange={(e) => setParameter(key, parseFloat(e.target.value))} />
+          </div>
+        ) : null
+      ))}
+    </div>
+  );
+}
+==== /mnt/data/jarvis/src/ui/design3d/StudioTopBar.tsx
+
+interface Props {
+  projectName: string;
+  onProjectNameChange: (name: string) => void;
+  onSave: () => void;
+  onUndo: () => void;
+  onRedo: () => void;
+  canUndo: boolean;
+  canRedo: boolean;
+  onReset: () => void;
+  onResetCamera: () => void;
+  wireframe: boolean;
+  onToggleWireframe: () => void;
+  onExit: () => void;
+  /** Undefined entirely (not just disabled) when no camera stream is
+   * available yet — a missing prop is a clearer signal than a disabled
+   * button with no explanation for why AR can't be reached from here. */
+  onToggleAR?: () => void;
+  arAvailable: boolean;
+}
+
+export function StudioTopBar(props: Props) {
+  return (
+    <div className="glass-panel hud-frame studio-toolbar studio-top">
+      <button className="studio-toolbar-btn studio-toolbar-btn--nav" onClick={props.onExit}>← Assistant</button>
+      <input
+        value={props.projectName}
+        onChange={(e) => props.onProjectNameChange(e.target.value)}
+        style={{ background: "transparent", border: "none", color: "var(--text-primary)", fontSize: 13, fontWeight: 600, flex: 1 }}
+      />
+      <button className="studio-toolbar-btn" onClick={props.onSave}>Save</button>
+      <button className="studio-toolbar-btn" onClick={props.onUndo} disabled={!props.canUndo}>Undo</button>
+      <button className="studio-toolbar-btn" onClick={props.onRedo} disabled={!props.canRedo}>Redo</button>
+      <button className="studio-toolbar-btn" onClick={props.onReset}>Reset</button>
+      <button className="studio-toolbar-btn" onClick={props.onResetCamera}>Reset Camera</button>
+      <button className="studio-toolbar-btn" onClick={props.onToggleWireframe} style={{ color: props.wireframe ? "var(--accent-cyan)" : undefined }}>
+        Wireframe
+      </button>
+      {props.arAvailable && props.onToggleAR && (
+        <button className="studio-toolbar-btn studio-toolbar-btn--nav" onClick={props.onToggleAR}>AR</button>
+      )}
+    </div>
+  );
+}
+==== /mnt/data/jarvis/src/ui/design3d/Viewport.tsx
+import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
+import { SceneManager } from "../../design3d/engine/SceneManager";
+import { GraphRenderer } from "../../design3d/engine/GraphRenderer";
+import type { DesignController } from "../../design3d/commands/DesignController";
+
+interface Props {
+  controller: DesignController;
+  selectedId: string | null;
+  onSelect: (id: string | null) => void;
+  wireframe: boolean;
+  /** Bumped by the parent whenever the graph changes, so the viewport
+   * re-syncs meshes without needing the graph itself to be reactive
+   * state (DesignGraph is a plain class, not observed by React). */
+  syncToken: number;
+}
+
+export interface ViewportHandle {
+  resetCamera: () => void;
+  getRendererInfo: () => { drawCalls: number; triangles: number } | null;
+}
+
+/**
+ * # Status: UNVERIFIED — real Three.js mount/dispose lifecycle, not run
+ * against a browser in this sandbox. The mount/unmount pairing below is
+ * the part spec section 4 cares most about (no leaked WebGL contexts) —
+ * written carefully, not confirmed.
+ */
+export const Viewport = forwardRef<ViewportHandle, Props>(function Viewport(
+  { controller, selectedId, onSelect, wireframe, syncToken }, ref
+) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const sceneManagerRef = useRef<SceneManager | null>(null);
+  const rendererRef = useRef<GraphRenderer | null>(null);
+
+  useImperativeHandle(ref, () => ({
+    resetCamera: () => sceneManagerRef.current?.resetCamera(),
+    getRendererInfo: () => sceneManagerRef.current?.getRendererInfo() ?? null,
+  }), []);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const sceneManager = new SceneManager();
+    const graphRenderer = new GraphRenderer(sceneManager);
+    sceneManager.mount(container);
+    graphRenderer.syncFromGraph(controller.graph);
+    sceneManagerRef.current = sceneManager;
+    rendererRef.current = graphRenderer;
+
+    const handleClick = (e: MouseEvent) => {
+      const rect = container.getBoundingClientRect();
+      const ndcX = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+      const ndcY = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+      const hitId = graphRenderer.raycastSelect(sceneManager.camera, ndcX, ndcY);
+      onSelect(hitId);
+    };
+    container.addEventListener("click", handleClick);
+
+    return () => {
+      container.removeEventListener("click", handleClick);
+      // Full teardown per spec section 4 — renderer, controls, meshes,
+      // geometries, materials, textures, and the resize observer all go
+      // away here. This is the single most important cleanup path in the
+      // whole 3D subsystem.
+      graphRenderer.dispose();
+      sceneManager.dispose();
+      sceneManagerRef.current = null;
+      rendererRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // mount once; controller identity is stable for the studio's lifetime
+
+  useEffect(() => {
+    rendererRef.current?.syncFromGraph(controller.graph);
+  }, [syncToken, controller]);
+
+  useEffect(() => {
+    rendererRef.current?.select(selectedId);
+  }, [selectedId]);
+
+  useEffect(() => {
+    sceneManagerRef.current?.setWireframe(wireframe);
+  }, [wireframe]);
+
+  return <div ref={containerRef} className="studio-viewport glass-panel hud-frame" />;
+});
+==== /mnt/data/jarvis/src/ui/settings/SettingsPage.tsx
+import { useEffect, useState } from "react";
+import type { JarvisSettings } from "../../settings/types";
+import { validateSettings } from "../../settings/types";
+import { aiProviderRegistry } from "../../ai/AIProvider";
+import { toFriendlyProviderError } from "../../ai/providerErrors";
+import type { JarvisSettings as PerceptionSettings } from "../../config/settings";
+import type { MemoryEntry } from "../../orchestrator/MemoryGuard";
+
+interface Props {
+  settings: JarvisSettings;
+  onChange: (settings: JarvisSettings) => void;
+  onSave: () => Promise<void>;
+  onSaveProviderKey: (providerName: string, key: string, extra?: { baseUrl?: string; model?: string }) => Promise<void>;
+  onRemoveProviderKey: (providerName: string) => Promise<void>;
+  /** Real voices window.speechSynthesis actually reports on this machine
+   * — never a hardcoded list. See WebSpeechProvider.ts's waitForVoices(). */
+  onListVoices: () => Promise<SpeechSynthesisVoice[]>;
+  /** Speaks a short real sentence with the CURRENTLY configured
+   * rate/pitch/volume/voice via the real TTS provider — lets the person
+   * hear their settings before committing, not a simulated preview. */
+  onTestVoice: () => Promise<void>;
+  /** True once a real startup attempt to start wake-word detection has
+   * genuinely failed (see WakeWordProvider.ts) — drives an honest note in
+   * the UI rather than a checkbox that silently does nothing. */
+  wakeWordUnavailable: boolean;
+  onTestProviderKey: (providerName: string) => Promise<boolean>;
+  /** REAL bug found and fixed this session: SettingsPage previously had no
+   * way back to Home at all — it's a fully separate top-level view (see
+   * App.tsx's `if (view === "settings") return <SettingsPage .../>`), and
+   * no exit control was ever wired to it, unlike DesignStudio which always
+   * had one. Verifying "every route" surfaced this as a real dead end, not
+   * a cosmetic issue. */
+  onExit: () => void;
+  /** The REAL, live Phase 3 perception settings object — see the Vision
+   * tab's implementation comment and PHASE-CONTINUITY.md gap #6. */
+  visionSettings: PerceptionSettings;
+  onVisionSettingsChange: (settings: PerceptionSettings) => void;
+  /** Real memory list + actions — see PHASE-CONTINUITY.md gap #1 (fixed
+   * this session). Only ever contains APPROVED entries
+   * (MemoryOrchestrator.retrieveApprovedMemories's own guarantee) — never
+   * shows unapproved AI-inferred proposals here, since surfacing those
+   * would itself undermine the consent model. */
+  memories: MemoryEntry[];
+  memoriesLoading: boolean;
+  onDeleteMemory: (id: string) => Promise<void>;
+  onRefreshMemories: () => Promise<void>;
+}
+
+const TABS = ["AI", "Voice", "Vision", "Screen", "Memory", "Privacy & Security", "Appearance", "System"] as const;
+type Tab = typeof TABS[number];
+
+export function SettingsPage({
+  settings, onChange, onSave, onSaveProviderKey, onRemoveProviderKey, onTestProviderKey, onExit,
+  onListVoices, onTestVoice, wakeWordUnavailable,
+  visionSettings, onVisionSettingsChange, memories, memoriesLoading, onDeleteMemory, onRefreshMemories,
+}: Props) {
+  const [tab, setTab] = useState<Tab>("AI");
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [keyInputs, setKeyInputs] = useState<Record<string, string>>({});
+  const [baseUrlInputs, setBaseUrlInputs] = useState<Record<string, string>>({});
+  const [modelInputs, setModelInputs] = useState<Record<string, string>>({});
+  const [testResults, setTestResults] = useState<Record<string, "idle" | "testing" | "ok" | "fail">>({});
+  const [keyErrors, setKeyErrors] = useState<Record<string, string | null>>({});
+  const [savingKey, setSavingKey] = useState<Record<string, boolean>>({});
+  const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
+  const [voiceTestState, setVoiceTestState] = useState<"idle" | "testing" | "error">("idle");
+
+  useEffect(() => {
+    let cancelled = false;
+    if (tab === "Voice") {
+      onListVoices().then((v) => { if (!cancelled) setVoices(v); });
+    }
+    return () => { cancelled = true; };
+  }, [tab, onListVoices]);
+
+  /** Single source of truth for the visible status label — spec's
+   * required language ("Connected / Not configured / Connection failed /
+   * Testing...") derived from real state, never fabricated. A key
+   * existing does not by itself mean "Connected" — only a successful
+   * test or a successful real call earns that label. */
+  function providerStatusLabel(cfg: { hasApiKey: boolean; name: string }): { text: string; tone: "ok" | "warn" | "error" | "neutral" } {
+    if (testResults[cfg.name] === "testing") return { text: "Testing…", tone: "neutral" };
+    if (!cfg.hasApiKey) return { text: "Not configured", tone: "neutral" };
+    if (testResults[cfg.name] === "fail") return { text: "Connection failed", tone: "error" };
+    if (testResults[cfg.name] === "ok") return { text: "Connected", tone: "ok" };
+    return { text: "Key saved — not yet tested", tone: "warn" };
+  }
+
+  function patch<K extends keyof JarvisSettings>(section: K, value: JarvisSettings[K]): void {
+    const next = { ...settings, [section]: value };
+    const result = validateSettings(next);
+    if (!result.valid) {
+      setSaveError(result.errors.join("; "));
+      return;
+    }
+    setSaveError(null);
+    onChange(next);
+  }
+
+  async function handleTestKey(name: string): Promise<void> {
+    setTestResults((r) => ({ ...r, [name]: "testing" }));
+    try {
+      const ok = await onTestProviderKey(name);
+      setTestResults((r) => ({ ...r, [name]: ok ? "ok" : "fail" }));
+    } catch (err) {
+      // "Connection failed" is the correct clean label either way — the
+      // real reason still goes to the console (same discipline as
+      // toFriendlyProviderError) so it's not silently swallowed for
+      // anyone actually debugging a failed test.
+      // eslint-disable-next-line no-console
+      console.error("[jarvis:provider:test]", err);
+      setTestResults((r) => ({ ...r, [name]: "fail" }));
+    }
+  }
+
+  return (
+    <div className="settings-page">
+      <nav className="settings-tabs">
+        <button className="settings-tab settings-tab--back" onClick={onExit}>‹ Back</button>
+        {TABS.map((t) => (
+          <button key={t} className={`settings-tab ${tab === t ? "settings-tab--active" : ""}`} onClick={() => setTab(t)}>{t}</button>
+        ))}
+      </nav>
+
+      <div className="settings-content">
+        {tab === "AI" && (
+          <div>
+            <h3>AI Providers</h3>
+            {aiProviderRegistry.allConfigs().map((cfg) => {
+              const statusLabel = providerStatusLabel(cfg);
+              const currentInput = keyInputs[cfg.name] ?? "";
+              const isSaving = savingKey[cfg.name] === true;
+              const isOpenAiCompatible = cfg.name === "openai_compatible";
+              const currentBaseUrl = baseUrlInputs[cfg.name] ?? cfg.baseUrl ?? "";
+              const currentModel = modelInputs[cfg.name] ?? (cfg.model !== "default" ? cfg.model : "");
+              // openai_compatible has no built-in endpoint — Save stays
+              // disabled until baseUrl+model are ALSO filled in, not just
+              // the key (see OpenAICompatibleGenericProvider's constructor
+              // guard, which would otherwise just reject the save).
+              const missingRequiredFields = isOpenAiCompatible && (currentBaseUrl.trim().length === 0 || currentModel.trim().length === 0);
+              return (
+                <div key={cfg.name} className="settings-provider-row">
+                  <label className="settings-provider-name">
+                    <input type="checkbox" checked={cfg.enabled} onChange={(e) => aiProviderRegistry.updateConfig(cfg.name, { enabled: e.target.checked })} />
+                    {cfg.displayName}
+                  </label>
+                  <span className={`ar-badge settings-status-badge settings-status-badge--${statusLabel.tone}`}>{statusLabel.text}</span>
+                  {isOpenAiCompatible && (
+                    <>
+                      <input
+                        type="text"
+                        placeholder="Base URL (e.g. https://your-endpoint/v1)"
+                        value={currentBaseUrl}
+                        onChange={(e) => setBaseUrlInputs((b) => ({ ...b, [cfg.name]: e.target.value }))}
+                      />
+                      <input
+                        type="text"
+                        placeholder="Model name"
+                        value={currentModel}
+                        onChange={(e) => setModelInputs((m) => ({ ...m, [cfg.name]: e.target.value }))}
+                      />
+                    </>
+                  )}
+                  <input
+                    type="password"
+                    placeholder={cfg.hasApiKey ? "•••••••• (enter a new key to change it)" : "Paste API key"}
+                    value={currentInput}
+                    onChange={(e) => { setKeyInputs((k) => ({ ...k, [cfg.name]: e.target.value })); setKeyErrors((k) => ({ ...k, [cfg.name]: null })); }}
+                  />
+                  <button
+                    className="studio-toolbar-btn"
+                    disabled={currentInput.trim().length === 0 || isSaving || missingRequiredFields}
+                    onClick={async () => {
+                      setSavingKey((s) => ({ ...s, [cfg.name]: true }));
+                      setKeyErrors((k) => ({ ...k, [cfg.name]: null }));
+                      try {
+                        // onSaveProviderKey (App.tsx) is the authoritative
+                        // path — it constructs the REAL provider instance
+                        // and updates the registry config together.
+                        await onSaveProviderKey(
+                          cfg.name, currentInput.trim(),
+                          isOpenAiCompatible ? { baseUrl: currentBaseUrl.trim(), model: currentModel.trim() } : undefined
+                        );
+                        setKeyInputs((k) => ({ ...k, [cfg.name]: "" }));
+                        setTestResults((r) => ({ ...r, [cfg.name]: "idle" })); // a new key invalidates any prior test result — don't keep showing a stale "Connected"
+                      } catch (err) {
+                        // Root cause investigated and fixed this session
+                        // (see providerErrors.ts's doc comment) — this
+                        // used to render err.message RAW, which is how a
+                        // Tauri-bridge-missing error like "Cannot read
+                        // properties of undefined (reading 'invoke')"
+                        // ended up directly in the Settings UI. The full
+                        // technical error is still logged to the console
+                        // (see toFriendlyProviderError) — only the
+                        // ON-SCREEN string is sanitized.
+                        setKeyErrors((k) => ({ ...k, [cfg.name]: toFriendlyProviderError(err, "save") }));
+                      } finally {
+                        setSavingKey((s) => ({ ...s, [cfg.name]: false }));
+                      }
+                    }}
+                  >
+                    {isSaving ? "Saving…" : cfg.hasApiKey ? "Update" : "Save"}
+                  </button>
+                  <button className="studio-toolbar-btn" disabled={!cfg.hasApiKey} onClick={() => handleTestKey(cfg.name)}>
+                    {testResults[cfg.name] === "testing" ? "Testing…" : "Test connection"}
+                  </button>
+                  <button
+                    className="studio-toolbar-btn"
+                    disabled={!cfg.hasApiKey}
+                    onClick={async () => {
+                      try {
+                        await onRemoveProviderKey(cfg.name);
+                        setTestResults((r) => ({ ...r, [cfg.name]: "idle" }));
+                        setKeyErrors((k) => ({ ...k, [cfg.name]: null }));
+                      } catch (err) {
+                        // Previously unhandled entirely — a failed remove
+                        // (e.g. keychain access error) silently did
+                        // nothing, leaving the user unsure whether it
+                        // worked. Now it fails visibly, same pattern as Save.
+==== /mnt/data/jarvis/src/ui/styles/global.css
+:root {
+  --bg-void: #05080c;
+  --bg-panel: rgba(16, 24, 32, 0.6);
+  --bg-panel-solid: #0c1218;
+  --border-glass: rgba(120, 210, 255, 0.14);
+  --accent-cyan: #4ee1ff;
+  --accent-blue: #2e7cf6;
+  /* JARVIS core palette — controlled orange/gold, reserved for the AI core
+     itself and its direct state feedback. HUD chrome (panels, borders, nav)
+     stays cyan/teal throughout — see design note in JarvisVisualizer.ts. */
+  --accent-core: #ff9d4d;
+  --accent-core-hot: #ffe3b0;
+  --text-primary: #e8f4ff;
+  --text-muted: #7d93a3;
+  --danger: #ff5c5c;
+  --warning: #ffb84d;
+  --safe: #4ee1a0;
+  --radius: 14px;
+  --font-display: "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "Cascadia Code", "Consolas", monospace;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  /* Sparse cyan "constellation" starfield — replaces last session's
+     graph-paper grid lines, which read as busier/more technical than the
+     reference screenshots' scattered dot background. Plain radial-gradient
+     dots at varied positions within a large repeating tile, rather than a
+     regular grid, avoid the same "too busy" complaint in a different form. */
+  background:
+    radial-gradient(ellipse at 50% -10%, #0d1b26 0%, transparent 55%),
+    radial-gradient(ellipse at 85% 100%, rgba(255, 157, 77, 0.05) 0%, transparent 45%),
+    radial-gradient(1.5px 1.5px at 8% 22%, rgba(120, 210, 255, 0.5), transparent 100%),
+    radial-gradient(1px 1px at 27% 68%, rgba(120, 210, 255, 0.35), transparent 100%),
+    radial-gradient(1.5px 1.5px at 61% 14%, rgba(120, 210, 255, 0.45), transparent 100%),
+    radial-gradient(1px 1px at 78% 52%, rgba(120, 210, 255, 0.3), transparent 100%),
+    radial-gradient(1.5px 1.5px at 92% 81%, rgba(120, 210, 255, 0.4), transparent 100%),
+    radial-gradient(1px 1px at 15% 89%, rgba(120, 210, 255, 0.3), transparent 100%),
+    radial-gradient(1px 1px at 45% 40%, rgba(120, 210, 255, 0.25), transparent 100%),
+    var(--bg-void);
+  background-size: 100% 100%, 100% 100%, 480px 480px, 480px 480px, 480px 480px, 480px 480px, 480px 480px, 480px 480px, 480px 480px;
+  color: var(--text-primary);
+  font-family: var(--font-display);
+  overflow: hidden;
+}
+
+.jarvis-shell {
+  position: relative;
+  display: grid;
+  grid-template-rows: auto 1fr;
+  height: 100vh;
+  gap: 12px;
+  padding: 16px;
+}
+
+.glass-panel {
+  background: var(--bg-panel);
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  box-shadow: 0 0 40px rgba(78, 225, 255, 0.03), inset 0 1px 0 rgba(255,255,255,0.03);
+}
+
+/* HUD corner-bracket framing — applied selectively to the panels that read
+   as distinct "modules" of the command center (rails, status bar, input
+   bar, camera panel), not to every small glass surface, per the "avoid
+   clutter" instruction. */
+.hud-frame { position: relative; }
+.hud-frame::before, .hud-frame::after {
+  content: "";
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  border: 1.5px solid var(--accent-cyan);
+  opacity: 0.5;
+  pointer-events: none;
+}
+.hud-frame::before { top: -1px; left: -1px; border-right: none; border-bottom: none; border-top-left-radius: 4px; }
+.hud-frame::after { bottom: -1px; right: -1px; border-left: none; border-top: none; border-bottom-right-radius: 4px; }
+
+.status-bar {
+  display: flex;
+  flex-direction: column;
+  padding: 8px 16px;
+}
+
+.status-bar__row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.status-bar__spacer { flex: 1; }
+
+/* Corner gear icon (Settings) — matches the reference screenshots' small
+   top-left gear, distinct from the centered pill nav. */
+.status-bar__corner-icon {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 15px;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: color 0.15s;
+}
+.status-bar__corner-icon:hover { color: var(--accent-cyan); }
+
+/* Centered pill nav — small rounded icon+label buttons, matching the
+   reference screenshots' "Home / Chat / Dashboard" top nav exactly in
+   spirit. Mapped to this app's REAL top-level screens: Home (this
+   command center), Dashboard (a distinct module overview — see
+   Dashboard.tsx), and 3D Viewport (Design Studio). There is no separate
+   literal "Chat" screen in this app's architecture — Home already IS the
+   chat/voice command center — so it isn't force-fit as its own tab. */
+.status-bar__pillnav {
+  display: flex;
+  gap: 6px;
+  margin: 0 auto;
+}
+.status-bar__pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  padding: 5px 13px;
+  cursor: default;
+}
+button.status-bar__pill--btn { cursor: pointer; }
+button.status-bar__pill--btn:hover { color: var(--text-primary); border-color: var(--border-glass); }
+.status-bar__pill--active { color: var(--accent-cyan); background: rgba(78, 225, 255, 0.08); border-color: rgba(78, 225, 255, 0.2); }
+
+.status-bar__icon-btn {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--text-muted);
+  font-size: 14px;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+.status-bar__icon-btn:hover { color: var(--accent-cyan); border-color: var(--border-glass); background: rgba(78,225,255,0.06); }
+.status-bar__icon-btn--active { color: var(--accent-cyan); border-color: var(--border-glass); }
+
+.status-bar__detail {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-glass);
+}
+
+.status-cluster {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+}
+
+.status-bar__provider {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--accent-cyan);
+  padding: 2px 8px;
+  border: 1px solid var(--border-glass);
+  border-radius: 20px;
+}
+
+.status-bar__nav {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.status-bar__nav-btn {
+  background: transparent;
+  border: 1px solid var(--border-glass);
+  border-radius: 6px;
+  color: var(--text-muted);
+  font-size: 11px;
+  padding: 5px 10px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+.status-bar__nav-btn:hover { color: var(--text-primary); border-color: var(--accent-cyan); }
+.status-bar__nav-btn--active { color: var(--accent-cyan); border-color: var(--accent-cyan); }
+
+.status-bar__command-input {
+  background: var(--bg-panel-solid);
+  border: 1px solid var(--border-glass);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-size: 11.5px;
+  padding: 5px 10px;
+  width: 200px;
+}
+.status-bar__command-input:focus { outline: none; border-color: var(--accent-cyan); }
+
+.status-dot {
+  display: flex;

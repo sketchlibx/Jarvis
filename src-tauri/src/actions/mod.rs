@@ -8,4 +8,4 @@ pub mod tool;
 pub mod tools;
 
 pub use registry::ToolRegistry;
-pub use tool::{Tool, ToolCapabilities, ToolError, ToolResult};
+pub use tool::Tool;

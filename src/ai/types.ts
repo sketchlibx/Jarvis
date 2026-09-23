@@ -41,6 +41,11 @@ export interface ProviderConfig {
    * show a status dot without ever holding the secret in this object. */
   hasApiKey: boolean;
   model: string;
+  /** Only meaningful (and only ever shown in Settings) for the
+   * user-configurable "openai_compatible" provider, which has no sensible
+   * built-in default the way Claude/Gemini/Grok/DeepSeek do — every other
+   * provider leaves this undefined and uses its own hardcoded endpoint. */
+  baseUrl?: string;
   /** Lower number = tried first. Ties broken by registration order. */
   priority: number;
   capabilities: ProviderCapability[];
@@ -64,6 +69,14 @@ export interface RoutingRequest {
   /** If set, the router MUST use exactly this provider or fail — never
    * silently substitute another one (spec section 4's explicit rule). */
   forceProvider?: string;
+  /** Settings' "Default provider" + fallbackBehavior:"fallback" case —
+   * distinct from forceProvider: tries this one FIRST if it's usable, but
+   * still falls through to the normal priority-ordered candidate list on
+   * failure/unavailability, rather than failing outright. Ignored when
+   * forceProvider is also set (forceProvider is strictly stronger — it's
+   * the "never substitute" case, this is the "prefer, but may substitute"
+   * case). */
+  preferProvider?: string;
 }
 
 export type RoutingFailureReason =

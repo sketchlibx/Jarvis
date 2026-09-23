@@ -1,4 +1,5 @@
-import React from "react";
+
+import { useEffect } from "react";
 
 interface Props {
   destination: string;
@@ -16,25 +17,28 @@ interface Props {
 export function ConflictDialog({ destination, onReplace, onCopy, onCancel }: Props) {
   const filename = destination.split(/[\\/]/).pop() ?? destination;
 
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onCancel();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onCancel]);
+
   return (
-    <div className="confirm-backdrop" role="alertdialog" aria-modal="true">
-      <div className="confirm-card">
-        <span className="confirm-risk-badge" style={{ background: "rgba(78,225,255,0.12)", color: "var(--accent-cyan)" }}>
-          ALREADY EXISTS
-        </span>
-        <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 6 }}>{filename} already exists</div>
-        <div style={{ fontSize: 13.5, color: "var(--text-muted)", lineHeight: 1.5 }}>
-          Replace it, keep both by creating a copy, or cancel.
-        </div>
-        <div className="confirm-actions" style={{ flexWrap: "wrap" }}>
-          <button className="confirm-btn confirm-btn--cancel" onClick={onCancel}>Cancel</button>
-          <button
-            className="confirm-btn"
-            style={{ background: "rgba(78,225,255,0.15)", color: "var(--accent-cyan)" }}
-            onClick={onCopy}
-          >
-            Create Copy
-          </button>
+    <div
+      className="confirm-backdrop"
+      role="alertdialog"
+      aria-modal="true"
+      onClick={(e) => { if (e.target === e.currentTarget) onCancel(); }}
+    >
+      <div className="confirm-card hud-frame confirm-card--info">
+        <span className="confirm-risk-badge confirm-risk-badge--info">ALREADY EXISTS</span>
+        <div className="confirm-card__action">{filename} already exists</div>
+        <div className="confirm-card__body">Replace it, keep both by creating a copy, or cancel.</div>
+        <div className="confirm-actions confirm-actions--wrap">
+          <button className="confirm-btn confirm-btn--cancel" onClick={onCancel} autoFocus>Cancel</button>
+          <button className="confirm-btn confirm-btn--info" onClick={onCopy}>Create Copy</button>
           <button className="confirm-btn confirm-btn--confirm" onClick={onReplace}>Replace</button>
         </div>
       </div>

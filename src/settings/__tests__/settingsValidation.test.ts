@@ -30,6 +30,22 @@ describe("Settings validation", () => {
     expect(validateSettings(tampered).valid).toBe(false);
   });
 
+  it("rejects an out-of-range AI request timeout", () => {
+    const tooLow = JSON.parse(JSON.stringify(DEFAULT_SETTINGS));
+    tooLow.ai.requestTimeoutSeconds = 1;
+    expect(validateSettings(tooLow).valid).toBe(false);
+
+    const tooHigh = JSON.parse(JSON.stringify(DEFAULT_SETTINGS));
+    tooHigh.ai.requestTimeoutSeconds = 10000;
+    expect(validateSettings(tooHigh).valid).toBe(false);
+  });
+
+  it("accepts a valid AI request timeout", () => {
+    const ok = JSON.parse(JSON.stringify(DEFAULT_SETTINGS));
+    ok.ai.requestTimeoutSeconds = 30;
+    expect(validateSettings(ok).valid).toBe(true);
+  });
+
   it("deserializeSettings succeeds on valid input", () => {
     expect(deserializeSettings(DEFAULT_SETTINGS).success).toBe(true);
   });

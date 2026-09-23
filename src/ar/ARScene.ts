@@ -18,6 +18,13 @@ import { GraphRenderer, type GraphRendererHost } from "../design3d/engine/GraphR
  * — see that file) to build the actual meshes from `DesignGraph`, rather
  * than re-implementing geometry/material construction — spec section 1's
  * "do not duplicate 3D scene systems."
+ *
+ * Visual completion pass (this session): added hand-wrist markers, a face
+ * marker, and a selection outline that recolors by real interactionMode
+ * (grab/transfer feedback). None of these introduce new tracking — they
+ * render anchor positions and instance state this class already receives
+ * every frame via update()'s parameters. Pose markers were deliberately
+ * NOT added this pass — see PHASE-CONTINUITY.md for why.
  */
 export class ARScene implements GraphRendererHost {
   readonly scene: THREE.Scene;
@@ -38,6 +45,16 @@ export class ARScene implements GraphRendererHost {
   // values are never touched by AR placement, only this wrapper Group is).
   private instanceGroups = new Map<string, THREE.Group>();
 
+  // Visual-only additions (this session): render markers at anchor
+  // positions ARScene ALREADY receives every frame via update()'s
+  // `anchors` map — no new tracking math, no second hand/gesture system.
+  // Hidden whenever the corresponding anchor isn't currently visible,
+  // per spec section 14's "don't show placement for lost tracking."
+  private handMarkers = new Map<"left_hand" | "right_hand", THREE.Mesh>();
+  private faceMarker: THREE.Mesh;
+  private selectedInstanceId: string | null = null;
+  private selectionOutline: THREE.Box3Helper | null = null;
+
   constructor(designGraph: DesignGraph, verticalFovDegrees = 50) {
     this.scene = new THREE.Scene();
     // No background color set — this scene must render transparent so the
@@ -54,6 +71,38 @@ export class ARScene implements GraphRendererHost {
     // GraphRendererHost directly, no adapter object or unsafe cast needed.
     this.graphRenderer = new GraphRenderer(this);
     this.graphRenderer.syncFromGraph(designGraph);
+
+    // Hand-wrist markers: small cyan rings, one per hand source. Cyan
+    // because this is HUD/tracking chrome, not the JARVIS core itself —
+    // see global.css's color-role rule (orange/gold is reserved for the
+    // orb alone).
+    for (const source of ["left_hand", "right_hand"] as const) {
+      const marker = new THREE.Mesh(
+        new THREE.TorusGeometry(0.018, 0.0035, 8, 24),
+        new THREE.MeshBasicMaterial({ color: 0x4ee1ff, transparent: true, opacity: 0.8 })
+      );
+      marker.visible = false;
+      this.scene.add(marker);
+      this.handMarkers.set(source, marker);
+    }
+
+    // Face marker: a small crosshair-like ring, only ever shown when a
+    // real face anchor is currently visible (see update()) — never drawn
+    // speculatively.
+    this.faceMarker = new THREE.Mesh(
+      new THREE.RingGeometry(0.02, 0.024, 24),
+      new THREE.MeshBasicMaterial({ color: 0x4ee1ff, transparent: true, opacity: 0.5, side: THREE.DoubleSide })
+    );
+    this.faceMarker.visible = false;
+    this.scene.add(this.faceMarker);
+  }
+
+  /** Called by ARController whenever the Design Studio selection changes
+   * (spec section 21: selection is deterministic, driven by Design
+   * Studio's own selection state, never gesture-guessed). Drives the
+   * selection outline drawn in update(). */
+  setSelection(instanceId: string | null): void {
+    this.selectedInstanceId = instanceId;
   }
 
   /** Re-syncs meshes when the underlying design changes (rare compared to
@@ -70,6 +119,13 @@ export class ARScene implements GraphRendererHost {
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.resize(container.clientWidth, container.clientHeight);
     container.appendChild(this.renderer.domElement);
+    // Bug found during this session's orphaned-CSS sweep: global.css has
+    // had a `.ar-view canvas.ar-overlay` rule (pointer-events: none, fills
+    // the container) since an earlier session, but nothing ever put that
+    // class on the actual canvas element — it was dead CSS masking a real
+    // gap: without pointer-events:none, this transparent canvas could
+    // intercept clicks meant for whatever's visually behind/around it.
+    this.renderer.domElement.classList.add("ar-overlay");
 
     this.resizeObserver = new ResizeObserver(() => {
       if (this.container) this.resize(this.container.clientWidth, this.container.clientHeight);
@@ -149,6 +205,54 @@ export class ARScene implements GraphRendererHost {
       // section 14) — there's no separate freeze/fade state to manage
       // here because simply not writing new values already produces it.
     }
+
+    // Hand markers — purely visualizing anchors already computed above;
+    // no new landmark math.
+    for (const [source, marker] of this.handMarkers) {
+      const anchor = anchors.get(`${source}:HAND_WRIST`);
+      if (anchor && anchor.visible) {
+        marker.visible = true;
+        marker.position.set(anchor.position.x, anchor.position.y, anchor.position.z);
+        marker.quaternion.set(anchor.rotation.x, anchor.rotation.y, anchor.rotation.z, anchor.rotation.w);
+      } else {
+        marker.visible = false;
+      }
+    }
+
+    // Face marker — same principle: only shown when Phase 3's face
+    // detector is actually producing a visible anchor this frame.
+    const faceAnchor = anchors.get("face:FACE");
+    if (faceAnchor && faceAnchor.visible) {
+      this.faceMarker.visible = true;
+      this.faceMarker.position.set(faceAnchor.position.x, faceAnchor.position.y, faceAnchor.position.z);
+      this.faceMarker.quaternion.set(faceAnchor.rotation.x, faceAnchor.rotation.y, faceAnchor.rotation.z, faceAnchor.rotation.w);
+    } else {
+      this.faceMarker.visible = false;
+    }
+
+    // Selection + grab/transfer feedback — colors the SAME outline by the
+    // REAL `interactionMode` ARController already tracks per instance
+    // (IDLE/HOVER/GRABBING/TWO_HAND_TRANSFORMING), rather than a separate
+    // fabricated "is grabbing" flag.
+    const selected = this.selectedInstanceId
+      ? instances.find((i) => i.id === this.selectedInstanceId)
+      : undefined;
+    const selectedGroup = this.selectedInstanceId ? this.instanceGroups.get(this.selectedInstanceId) : undefined;
+    if (selected && selectedGroup && selectedGroup.visible) {
+      if (!this.selectionOutline) {
+        this.selectionOutline = new THREE.Box3Helper(new THREE.Box3(), 0x4ee1ff);
+        this.scene.add(this.selectionOutline);
+      }
+      this.selectionOutline.box.setFromObject(selectedGroup);
+      const color =
+        selected.interactionMode === "GRABBING" ? 0x4ee1a0 :
+        selected.interactionMode === "TWO_HAND_TRANSFORMING" ? 0xffb84d :
+        0x4ee1ff; // IDLE/HOVER — plain HUD cyan
+      (this.selectionOutline.material as THREE.LineBasicMaterial).color.setHex(color);
+      this.selectionOutline.visible = true;
+    } else if (this.selectionOutline) {
+      this.selectionOutline.visible = false;
+    }
   }
 
   /** Full teardown — stops the render loop, disconnects the resize
@@ -170,6 +274,22 @@ export class ARScene implements GraphRendererHost {
     }
     this.instanceGroups.clear();
     this.graphRenderer.dispose();
+
+    for (const marker of this.handMarkers.values()) {
+      marker.geometry.dispose();
+      (marker.material as THREE.Material).dispose();
+      marker.parent?.remove(marker);
+    }
+    this.handMarkers.clear();
+    this.faceMarker.geometry.dispose();
+    (this.faceMarker.material as THREE.Material).dispose();
+    this.faceMarker.parent?.remove(this.faceMarker);
+    if (this.selectionOutline) {
+      this.selectionOutline.geometry.dispose();
+      (this.selectionOutline.material as THREE.Material).dispose();
+      this.selectionOutline.parent?.remove(this.selectionOutline);
+      this.selectionOutline = null;
+    }
 
     if (this.renderer) {
       this.renderer.dispose();

@@ -1,5 +1,5 @@
 use super::registry::ToolRegistry;
-use super::tool::{ToolError, ToolResult};
+use super::tool::ToolResult;
 use crate::security::{PolicyDecision, PolicyEngine};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

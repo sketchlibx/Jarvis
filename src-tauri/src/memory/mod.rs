@@ -1,2 +1,2 @@
 pub mod db;
-pub use db::{Memory, MemoryStore};
+pub use db::MemoryStore;

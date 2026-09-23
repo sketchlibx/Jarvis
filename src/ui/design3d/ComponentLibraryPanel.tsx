@@ -1,4 +1,3 @@
-import React from "react";
 import type { ComponentType } from "../../design3d/types";
 
 const CATEGORIES: Record<string, ComponentType[]> = {

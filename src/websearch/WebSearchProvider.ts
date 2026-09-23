@@ -1,12 +1,7 @@
 // ---------------------------------------------------------------------
-// Web search foundation — spec section 17. A tool/provider abstraction
-// SEPARATE from any one AI provider — search results flow INTO AI
-// reasoning as explicit context, never as a hidden capability bundled
-// into one provider's own API. Keeps "AI knowledge" vs "live web
-// information" vs "local computer information" clearly distinguishable.
-//
-// STATUS: INTERFACE-ONLY. No real search backend is wired up — this
-// sandbox has no network to build or test one against.
+// Web search foundation — spec section 17. Search is intentionally its own
+// provider abstraction so live web information stays separate from any AI
+// provider's internal knowledge.
 // ---------------------------------------------------------------------
 
 export interface WebSearchResult {
@@ -28,12 +23,11 @@ export interface WebSearchProvider {
   search(query: string): Promise<WebSearchResponse>;
 }
 
-/** The only implementation in this codebase — honestly reports
- * unavailable rather than fabricating search results. */
+/** Explicit fallback for runtimes that do not have a Tauri-backed search. */
 export class UnimplementedWebSearchProvider implements WebSearchProvider {
   readonly providerName = "none";
   isAvailable(): boolean { return false; }
   async search(query: string): Promise<WebSearchResponse> {
-    throw new Error(`Web search is not implemented yet (query was: ${JSON.stringify(query)}) — this is an interface-only foundation (spec section 17).`);
+    throw new Error(`Web search is unavailable in this runtime (query was: ${JSON.stringify(query)}).`);
   }
 }

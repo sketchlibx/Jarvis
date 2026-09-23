@@ -36,7 +36,14 @@ export interface AIPlanStep {
 export interface AIProvider {
   readonly providerName: string;
 
-  chat(messages: AIMessage[]): Promise<string>;
+  /** `signal` is optional and backward-compatible — every existing caller
+   * that doesn't pass one keeps working unchanged. When passed, an
+   * aborted signal must cause the underlying `fetch()` to reject with a
+   * standard `AbortError` rather than hang, which is what lets the app
+   * enforce a request timeout and a real user-initiated cancel (Phase 7
+   * security/reliability pass — previously nothing could stop or time out
+   * an in-flight provider call). */
+  chat(messages: AIMessage[], signal?: AbortSignal): Promise<string>;
 
   streamChat(
     messages: AIMessage[],
@@ -44,14 +51,15 @@ export interface AIProvider {
     signal?: AbortSignal
   ): Promise<void>;
 
-  classifyIntent(userText: string, availableIntents: string[]): Promise<AIIntent>;
+  classifyIntent(userText: string, availableIntents: string[], signal?: AbortSignal): Promise<AIIntent>;
 
-  generatePlan(goal: string, context: AIMessage[]): Promise<AIPlanStep[]>;
+  generatePlan(goal: string, context: AIMessage[], signal?: AbortSignal): Promise<AIPlanStep[]>;
 
-  summarize(text: string, maxWords?: number): Promise<string>;
+  summarize(text: string, maxWords?: number, signal?: AbortSignal): Promise<string>;
 
   generateStructuredOutput<T>(
     prompt: string,
-    spec: AIStructuredOutputSpec
+    spec: AIStructuredOutputSpec,
+    signal?: AbortSignal
   ): Promise<T>;
 }

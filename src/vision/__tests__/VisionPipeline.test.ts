@@ -33,6 +33,13 @@ class FakeScheduler {
 }
 
 function fakeVideo() {
+  // Phase 7 fix: `attachStream()` unconditionally calls `videoEl.play()`
+  // (see VisionPipeline.ts) — this helper was missing that method
+  // entirely, which meant EVERY test in this file that calls
+  // `attachStream()` would throw `TypeError: videoEl.play is not a
+  // function` the moment it actually ran (confirmed by reproducing it in
+  // isolation before this fix). `.play` returning a resolved Promise
+  // matches real `HTMLVideoElement.play()`'s return type.
   return { videoWidth: 640, videoHeight: 480, readyState: 4, play: () => Promise.resolve() } as any;
 }
 
@@ -64,13 +71,26 @@ const hand: HandObservation = {
 describe("VisionPipeline — duplicate-loop prevention", () => {
   it("does not schedule a second loop if start() is called twice", async () => {
     const scheduler = new FakeScheduler();
+    // ROOT CAUSE FIX: `vi.spyOn` must be installed BEFORE `makePipeline()`
+    // constructs the pipeline. `FakeScheduler.schedule` is an arrow-
+    // function class field (an own instance property, not a prototype
+    // method), and `makePipeline()` passes `scheduler.schedule` directly
+    // into the pipeline's constructor options — that VALUE is captured
+    // once, at construction time. Spying on `scheduler.schedule` AFTER
+    // construction replaces the property on the `scheduler` object going
+    // forward, but the pipeline already holds its own separate reference
+    // to the original (pre-spy) function and keeps calling that one — so
+    // the spy silently observes zero calls no matter what the pipeline
+    // actually does. Confirmed independently with a direct (non-spy)
+    // call counter that the real scheduling logic was correct the whole
+    // time; only the spy's installation order was wrong.
+    const scheduleSpy = vi.spyOn(scheduler, "schedule");
     const { pipeline } = makePipeline(scheduler);
     await pipeline.attachStream({ getVideoTracks: () => [{ addEventListener: () => {} }] } as any, fakeVideo());
 
-    const scheduleSpy = vi.spyOn(scheduler, "schedule");
     pipeline.start();
     pipeline.start(); // second call must be a no-op
-    // expect(scheduleSpy).toHaveBeenCalledTimes(1);
+    expect(scheduleSpy).toHaveBeenCalledTimes(1);
   });
 
   it("a stale callback from before stop() does nothing after stop()", async () => {
@@ -88,22 +108,25 @@ describe("VisionPipeline — duplicate-loop prevention", () => {
 
   it("restarting after stop requires re-attaching a stream, and then schedules exactly one new loop", async () => {
     const scheduler = new FakeScheduler();
+    // Same root-cause fix as the test above: spy installed before
+    // construction so the pipeline actually captures the spied function.
+    const scheduleSpyBeforeReattach = vi.spyOn(scheduler, "schedule");
     const { pipeline } = makePipeline(scheduler);
     await pipeline.attachStream({ getVideoTracks: () => [{ addEventListener: () => {} }] } as any, fakeVideo());
 
     pipeline.start();
     pipeline.stop();
+    scheduleSpyBeforeReattach.mockClear(); // isolate the count to what happens after stop()
 
     // Calling start() with no fresh attachStream() must do nothing —
     // stop() clears the video reference by design (see VisionPipeline's
     // start() doc comment).
-    const scheduleSpyBeforeReattach = vi.spyOn(scheduler, "schedule");
     pipeline.start();
     expect(scheduleSpyBeforeReattach).not.toHaveBeenCalled();
 
     await pipeline.attachStream({ getVideoTracks: () => [{ addEventListener: () => {} }] } as any, fakeVideo());
     pipeline.start();
-    // expect(scheduleSpyBeforeReattach).toHaveBeenCalledTimes(1);
+    expect(scheduleSpyBeforeReattach).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -158,5 +181,27 @@ describe("VisionPipeline — gesture integration", () => {
     scheduler.tick(0);
 
     expect(gestureSeen).toBe("open_hand");
+  });
+
+  it("Phase 7: updateOptions takes effect on the very next frame, without reconstructing the pipeline", async () => {
+    const scheduler = new FakeScheduler();
+    const handsDetector = fakeHandsDetector([[hand], [hand], [hand]]);
+    const { pipeline } = makePipeline(scheduler, handsDetector);
+    await pipeline.attachStream({ getVideoTracks: () => [{ addEventListener: () => {} }] } as any, fakeVideo());
+
+    pipeline.start();
+    scheduler.tick(0);
+    expect(handsDetector.detect).toHaveBeenCalledTimes(1); // enableHands: true from makePipeline's default options
+
+    // Disable hand detection live — this is exactly what Settings' Vision
+    // tab now does via App.tsx's sync effect.
+    pipeline.updateOptions({ enableHands: false });
+    scheduler.tick(1);
+    expect(handsDetector.detect).toHaveBeenCalledTimes(1); // still 1 -- the detector was NOT called on this frame
+
+    // Re-enable — confirms this isn't a one-way/stuck flag.
+    pipeline.updateOptions({ enableHands: true });
+    scheduler.tick(2);
+    expect(handsDetector.detect).toHaveBeenCalledTimes(2);
   });
 });

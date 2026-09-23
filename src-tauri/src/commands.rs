@@ -354,6 +354,111 @@ pub fn list_design_projects(state: State<AppState>) -> Result<Vec<crate::memory:
 // storing a copy anywhere else in the Rust process.
 // ---------------------------------------------------------------------
 
+
+#[derive(Debug, Deserialize)]
+pub struct ElevenLabsTtsRequest {
+    pub text: String,
+    #[serde(rename = "voiceId")]
+    pub voice_id: String,
+    #[serde(rename = "modelId")]
+    pub model_id: String,
+}
+
+/// Generates real ElevenLabs MP3 audio using the API key held in the OS
+/// keychain. The key never crosses the frontend boundary.
+#[tauri::command]
+pub async fn elevenlabs_tts(req: ElevenLabsTtsRequest) -> Result<Vec<u8>, String> {
+    let text = req.text.trim();
+    let voice_id = req.voice_id.trim();
+    let model_id = req.model_id.trim();
+
+    if text.is_empty() {
+        return Err("Text cannot be empty.".into());
+    }
+    if voice_id.is_empty() {
+        return Err("ElevenLabs voice ID is required.".into());
+    }
+    if model_id.is_empty() {
+        return Err("ElevenLabs model ID is required.".into());
+    }
+
+    let api_key = crate::security::keystore::get_provider_key("elevenlabs")?
+        .ok_or_else(|| "ElevenLabs is not configured. Add an API key in Settings → Voice.".to_string())?;
+
+    let url = format!(
+        "https://api.elevenlabs.io/v1/text-to-speech/{voice_id}?output_format=mp3_44100_128"
+    );
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post(url)
+        .header("xi-api-key", api_key)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .header(reqwest::header::ACCEPT, "audio/mpeg")
+        .json(&serde_json::json!({
+            "text": text,
+            "model_id": model_id
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("ElevenLabs request failed: {e}"))?;
+
+    // Copy these header values before consuming `response` with `.bytes()`.
+    // Keeping borrowed header references alive across `.bytes().await` would
+    // trigger Rust's E0505/E0597 borrow-checker errors.
+    let status = response.status();
+    let request_id = response
+        .headers()
+        .get("request-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
+        .unwrap_or_else(|| "unknown".to_string());
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
+        .unwrap_or_default();
+
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| format!("ElevenLabs response read failed: {e}"))?;
+
+    if !status.is_success() {
+        let detail = String::from_utf8_lossy(&bytes);
+        let detail = detail.chars().take(500).collect::<String>();
+        return Err(format!(
+            "ElevenLabs request failed ({}), request-id {}: {}",
+            status.as_u16(), request_id, detail
+        ));
+    }
+
+    if bytes.is_empty() {
+        return Err(format!(
+            "ElevenLabs returned an empty audio response (request-id {}).",
+            request_id
+        ));
+    }
+
+    // The synchronous endpoint should return audio. Allow the standard
+    // audio MIME types and octet-stream, but don't silently pass a successful
+    // JSON/HTML response into the decoder.
+    if !content_type.is_empty()
+        && !content_type.to_ascii_lowercase().starts_with("audio/")
+        && content_type.to_ascii_lowercase() != "application/octet-stream"
+    {
+        let detail = String::from_utf8_lossy(&bytes);
+        let detail = detail.chars().take(300).collect::<String>();
+        return Err(format!(
+            "ElevenLabs returned unexpected content type '{}' (request-id {}): {}",
+            content_type, request_id, detail
+        ));
+    }
+
+    Ok(bytes.to_vec())
+}
+
 #[tauri::command]
 pub fn save_provider_key(provider_name: String, api_key: String) -> Result<(), String> {
     crate::security::keystore::save_provider_key(&provider_name, &api_key)
@@ -374,9 +479,51 @@ pub fn test_provider_key_present(provider_name: String) -> Result<bool, String> 
     crate::security::keystore::test_provider_key_present(&provider_name)
 }
 
+/// Loads a previously-saved key back into the frontend so a real provider
+/// instance can be reconstructed after an app restart — see
+/// `keystore::get_provider_key`'s doc comment for why this is a deliberate
+/// design decision, not a security regression. Named distinctly from
+/// `get_provider_key_status` (which only ever returns a boolean, for UI
+/// display) so the two are never confused at a call site — this command
+/// should be called exactly once per provider, at startup, and its result
+/// should never be echoed back into any UI element or log statement.
+#[tauri::command]
+pub fn load_provider_key_for_session(provider_name: String) -> Result<Option<String>, String> {
+    crate::security::keystore::get_provider_key(&provider_name)
+}
+
 // ---------------------------------------------------------------------
 // Phase 6 — memory update/approval commands (spec section 16).
+// Extended this session: add/list/get/forget were never exposed as Tauri
+// commands at all — `TauriMemoryStore` (frontend) could not have been
+// implemented without them, since `MemoryBackingStore.add/get/listAll/
+// softDelete` had nothing to call through `invoke()`.
 // ---------------------------------------------------------------------
+
+#[tauri::command]
+pub fn add_memory(state: State<AppState>, content: String, kind: String, source: String, importance: i64, user_approved: bool) -> Result<String, String> {
+    state.memory.ensure_user("default", "User").map_err(|e| e.to_string())?;
+    state.memory.add_memory("default", &content, &kind, &source, importance, user_approved).map_err(|e| e.to_string())
+}
+
+/// Empty `query` matches every non-deleted memory for the user (the
+/// existing `LIKE '%' || query || '%'` search becomes `LIKE '%%'`, which
+/// matches everything) — reused deliberately rather than adding a second,
+/// parallel "list all" SQL query.
+#[tauri::command]
+pub fn list_memories(state: State<AppState>, limit: i64) -> Result<Vec<crate::memory::db::Memory>, String> {
+    state.memory.search_memories("default", "", limit).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_memory(state: State<AppState>, memory_id: String) -> Result<Option<crate::memory::db::Memory>, String> {
+    state.memory.get_memory(&memory_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn forget_memory(state: State<AppState>, memory_id: String) -> Result<(), String> {
+    state.memory.forget_memory(&memory_id).map_err(|e| e.to_string())
+}
 
 #[tauri::command]
 pub fn update_memory(state: State<AppState>, memory_id: String, content: String, importance: i64) -> Result<(), String> {
@@ -386,6 +533,41 @@ pub fn update_memory(state: State<AppState>, memory_id: String, content: String,
 #[tauri::command]
 pub fn approve_memory(state: State<AppState>, memory_id: String) -> Result<(), String> {
     state.memory.approve_memory(&memory_id).map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------
+// Phase 2 — conversation persistence. Deliberately separate commands from
+// the memory ones above: conversation history (every raw message) and
+// long-term memory (curated, approved facts) are different systems with
+// different lifecycles, per the schema's own separate tables since Phase
+// 1. Same "default" single-user convention the memory commands already
+// use — this app has no multi-user concept anywhere else either.
+// ---------------------------------------------------------------------
+
+#[tauri::command]
+pub fn create_conversation(state: State<AppState>, title: Option<String>) -> Result<String, String> {
+    state.memory.ensure_user("default", "User").map_err(|e| e.to_string())?;
+    state.memory.create_conversation("default", title.as_deref()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn save_message(state: State<AppState>, conversation_id: String, role: String, content: String) -> Result<String, String> {
+    state.memory.add_message(&conversation_id, &role, &content).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_conversation_messages(state: State<AppState>, conversation_id: String) -> Result<Vec<crate::memory::db::MessageRecord>, String> {
+    state.memory.get_messages(&conversation_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn list_conversations(state: State<AppState>, limit: i64) -> Result<Vec<crate::memory::db::ConversationSummary>, String> {
+    state.memory.list_conversations("default", limit).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn end_conversation(state: State<AppState>, conversation_id: String) -> Result<(), String> {
+    state.memory.end_conversation(&conversation_id).map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------
@@ -403,4 +585,47 @@ pub fn save_settings(state: State<AppState>, settings_json: String) -> Result<()
 #[tauri::command]
 pub fn load_settings(state: State<AppState>) -> Result<Option<String>, String> {
     state.memory.get_preference("default", "jarvis_settings").map_err(|e| e.to_string())
+}
+
+
+/// Real web research bridge. The frontend never receives a fake result: the
+/// Rust research module either returns live sourced material or an error.
+#[tauri::command]
+pub async fn web_research(query: String) -> Result<crate::research::WebResearchResponse, String> {
+    crate::research::web_research(&query).await
+}
+
+#[tauri::command]
+pub async fn start_remote_control(
+    remote: State<'_, crate::remote::RemoteControl>,
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<crate::remote::RemoteBridgeInfo, String> {
+    remote.start(app, state.audit.clone()).await
+}
+
+#[tauri::command]
+pub fn stop_remote_control(remote: State<crate::remote::RemoteControl>) -> Result<(), String> {
+    remote.stop()
+}
+
+#[tauri::command]
+pub fn remote_control_info(remote: State<crate::remote::RemoteControl>) -> Result<crate::remote::RemoteBridgeInfo, String> {
+    remote.info()
+}
+
+/// Lets the user invalidate the current pairing token and issue a fresh
+/// one without restarting the bridge (e.g. after sharing a pairing link
+/// they no longer trust, or simply on a schedule). See
+/// `RemoteControl::rotate_token`'s doc comment for why this works live.
+#[tauri::command]
+pub fn rotate_remote_control_token(remote: State<crate::remote::RemoteControl>) -> Result<crate::remote::RemoteBridgeInfo, String> {
+    remote.rotate_token()
+}
+
+#[tauri::command]
+pub fn update_remote_status(remote: State<crate::remote::RemoteControl>, status_json: String) -> Result<(), String> {
+    let status = serde_json::from_str::<crate::remote::RemoteStatus>(&status_json)
+        .map_err(|e| format!("invalid remote status: {e}"))?;
+    remote.update_status(status)
 }

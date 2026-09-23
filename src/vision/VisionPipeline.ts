@@ -122,6 +122,20 @@ export class VisionPipeline {
   }
 
   private snapshotListeners = new Set<(s: PerceptionSnapshot) => void>();
+
+  /** Additive extension (Phase 7 productization pass): lets Settings
+   * actually toggle hand/face/pose detection live, instead of only at
+   * construction time. `this.options.enable*` are already read fresh on
+   * every frame (see the detect loop below), so patching `this.options`
+   * here takes effect on the very next frame — no pipeline
+   * reconstruction, no risk of the "duplicate camera pipeline" bug class
+   * every prior phase's tests guard against, since this never touches
+   * `this.hands`/`this.face`/`this.pose`/`this.video` or restarts
+   * anything. */
+  updateOptions(patch: Partial<VisionPipelineOptions>): void {
+    this.options = { ...this.options, ...patch };
+  }
+
   onSnapshot(cb: (s: PerceptionSnapshot) => void): () => void {
     this.snapshotListeners.add(cb);
     return () => this.snapshotListeners.delete(cb);

@@ -1,5 +1,5 @@
 import type { FaceObservation, HandObservation, PoseObservation } from "../types/perception";
-import type { ARCommand, ARCalibration, TrackingState } from "./types";
+import type { ARCommand, ARCalibration, ARInteractionMode, TrackingState } from "./types";
 import { DEFAULT_CALIBRATION } from "./types";
 import { CoordinateMapper, type ViewportInfo } from "./CoordinateMapper";
 import { ARAnchorManager } from "./ARAnchorManager";
@@ -17,6 +17,10 @@ export interface ARControllerStats {
   handsDetected: number;
   activeInstances: number;
   selectedInstanceId: string | null;
+  /** Real per-instance interactionMode from ARInstanceManager for whichever
+   * instance is currently selected — drives the ControlBar's grab/transfer
+   * feedback badge. Null when nothing is selected. */
+  selectedInteractionMode: ARInteractionMode | null;
 }
 
 /**
@@ -79,6 +83,7 @@ export class ARController {
 
   setSelectedInstance(id: string | null): void {
     this.selectedInstanceId = id;
+    this.scene.setSelection(id);
   }
 
   /**
@@ -193,11 +198,13 @@ export class ARController {
   }
 
   getStats(): ARControllerStats {
+    const selected = this.selectedInstanceId ? this.instanceManager.get(this.selectedInstanceId) : undefined;
     return {
       trackingState: this.lastTrackingState,
       handsDetected: this.lastHandCount,
       activeInstances: this.instanceManager.all().length,
       selectedInstanceId: this.selectedInstanceId,
+      selectedInteractionMode: selected?.interactionMode ?? null,
     };
   }
 

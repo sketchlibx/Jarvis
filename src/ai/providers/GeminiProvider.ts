@@ -1,4 +1,3 @@
-/* eslint-disable no-constant-condition */
 import type { AIProvider, AIMessage, AIIntent, AIPlanStep, AIStructuredOutputSpec } from "../../types/ai";
 import { classifyIntentViaChat, generatePlanViaChat, summarizeViaChat, generateStructuredOutputViaChat } from "./promptBasedMethods";
 
@@ -22,7 +21,9 @@ interface GeminiProviderConfig {
   baseUrl?: string;
 }
 
-const DEFAULT_MODEL = "gemini-2.0-flash";
+// Current production default chosen for low-latency assistant replies.
+// Gemini 2.0 Flash was shut down on June 1, 2026.
+const DEFAULT_MODEL = "gemini-3.5-flash-lite";
 
 export class GeminiProvider implements AIProvider {
   readonly providerName = "gemini";
@@ -64,14 +65,19 @@ export class GeminiProvider implements AIProvider {
     return systemMsg ? { parts: [{ text: systemMsg.content }] } : undefined;
   }
 
-  private async request(path: string, body: Record<string, unknown>): Promise<any> {
-    // API key goes in the query string per Gemini's documented auth
-    // scheme — never logged, and deliberately excluded from thrown
-    // errors below (spec: "never expose API keys in logs/errors/UI").
-    const url = `${this.baseUrl()}/v1beta/models/${this.model()}:${path}?key=${this.config.apiKey}`;
+  private async request(path: string, body: Record<string, unknown>, signal?: AbortSignal): Promise<any> {
+    // Auth via the X-goog-api-key HEADER (Google's currently documented
+    // scheme), not the older `?key=` query-string parameter this file
+    // used previously. Same endpoint/method/body — this is strictly an
+    // auth-transport fix, not a rewrite. Security reason, not just
+    // contract-matching: a key in a URL is far more likely to end up
+    // somewhere it shouldn't (browser history, any HTTP/proxy access log,
+    // devtools network tab copy-paste) than a header ever is.
+    const url = `${this.baseUrl()}/v1beta/models/${this.model()}:${path}`;
     const res = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      signal,
+      headers: { "Content-Type": "application/json", "X-goog-api-key": this.config.apiKey },
       body: JSON.stringify(body),
     });
     if (!res.ok) {
@@ -81,22 +87,27 @@ export class GeminiProvider implements AIProvider {
     return res.json();
   }
 
-  async chat(messages: AIMessage[]): Promise<string> {
+  async chat(messages: AIMessage[], signal?: AbortSignal): Promise<string> {
     const data = await this.request("generateContent", {
       contents: this.toContents(messages),
       systemInstruction: this.systemInstruction(messages),
-    });
+      generationConfig: { temperature: 0.35, maxOutputTokens: 768 },
+    }, signal);
     const parts = data?.candidates?.[0]?.content?.parts ?? [];
     return parts.map((p: { text?: string }) => p.text ?? "").join("");
   }
 
   async streamChat(messages: AIMessage[], onToken: (token: string) => void, signal?: AbortSignal): Promise<void> {
-    const url = `${this.baseUrl()}/v1beta/models/${this.model()}:streamGenerateContent?alt=sse&key=${this.config.apiKey}`;
+    const url = `${this.baseUrl()}/v1beta/models/${this.model()}:streamGenerateContent?alt=sse`;
     const res = await fetch(url, {
       method: "POST",
       signal,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ contents: this.toContents(messages), systemInstruction: this.systemInstruction(messages) }),
+      headers: { "Content-Type": "application/json", "X-goog-api-key": this.config.apiKey },
+      body: JSON.stringify({
+        contents: this.toContents(messages),
+        systemInstruction: this.systemInstruction(messages),
+        generationConfig: { temperature: 0.35, maxOutputTokens: 768 },
+      }),
     });
     if (!res.ok || !res.body) {
       throw new Error(`Gemini streaming error ${res.status}`);
@@ -123,19 +134,19 @@ export class GeminiProvider implements AIProvider {
     }
   }
 
-  async classifyIntent(userText: string, availableIntents: string[]): Promise<AIIntent> {
-    return classifyIntentViaChat((m) => this.chat(m), userText, availableIntents);
+  async classifyIntent(userText: string, availableIntents: string[], signal?: AbortSignal): Promise<AIIntent> {
+    return classifyIntentViaChat((m, s) => this.chat(m, s), userText, availableIntents, signal);
   }
 
-  async generatePlan(goal: string, context: AIMessage[]): Promise<AIPlanStep[]> {
-    return generatePlanViaChat((m) => this.chat(m), goal, context);
+  async generatePlan(goal: string, context: AIMessage[], signal?: AbortSignal): Promise<AIPlanStep[]> {
+    return generatePlanViaChat((m, s) => this.chat(m, s), goal, context, signal);
   }
 
-  async summarize(text: string, maxWords = 100): Promise<string> {
-    return summarizeViaChat((m) => this.chat(m), text, maxWords);
+  async summarize(text: string, maxWords = 100, signal?: AbortSignal): Promise<string> {
+    return summarizeViaChat((m, s) => this.chat(m, s), text, maxWords, signal);
   }
 
-  async generateStructuredOutput<T>(prompt: string, spec: AIStructuredOutputSpec): Promise<T> {
-    return generateStructuredOutputViaChat<T>((m) => this.chat(m), "Gemini", prompt, spec);
+  async generateStructuredOutput<T>(prompt: string, spec: AIStructuredOutputSpec, signal?: AbortSignal): Promise<T> {
+    return generateStructuredOutputViaChat<T>((m, s) => this.chat(m, s), "Gemini", prompt, spec, signal);
   }
 }

@@ -10,7 +10,13 @@ import { checkMemoryContent } from "./MemoryGuard";
 // ---------------------------------------------------------------------
 
 export interface MemoryBackingStore {
-  add(entry: MemoryEntry): Promise<void> | void;
+  /** Returns the FULL persisted entry, including the store-assigned id —
+   * the caller (`MemoryOrchestrator`) never invents an id itself. This
+   * matters concretely for `TauriMemoryStore`: Rust's `add_memory`
+   * generates its own UUID server-side, so a caller-supplied id would be
+   * silently wrong/unused, breaking every subsequent `approve`/`delete`
+   * call keyed on the id `proposeMemory` returned to its caller. */
+  add(entry: Omit<MemoryEntry, "id">): Promise<MemoryEntry> | MemoryEntry;
   get(id: string): Promise<MemoryEntry | undefined> | MemoryEntry | undefined;
   listAll(): Promise<MemoryEntry[]> | MemoryEntry[];
   softDelete(id: string): Promise<void> | void;
@@ -20,14 +26,18 @@ export interface MemoryBackingStore {
 
 /** In-process store — used for testing, and as a reference
  * implementation the real Tauri-backed store's behavior must match. Not
- * persistent across app restarts (that's a `TauriMemoryStore`'s job,
- * calling the Rust commands added this phase — add_memory/update_memory/
- * approve_memory/forget_memory). */
+ * persistent across app restarts (that's `TauriMemoryStore`'s job,
+ * calling the real Rust commands: add_memory/list_memories/get_memory/
+ * forget_memory/update_memory/approve_memory). */
 export class InMemoryMemoryStore implements MemoryBackingStore {
   private entries = new Map<string, MemoryEntry & { deleted: boolean }>();
+  private idCounter = 0;
 
-  add(entry: MemoryEntry): void {
-    this.entries.set(entry.id, { ...entry, deleted: false });
+  add(entry: Omit<MemoryEntry, "id">): MemoryEntry {
+    this.idCounter += 1;
+    const full: MemoryEntry = { ...entry, id: `mem_${Date.now()}_${this.idCounter}` };
+    this.entries.set(full.id, { ...full, deleted: false });
+    return full;
   }
   get(id: string): MemoryEntry | undefined {
     const e = this.entries.get(id);
@@ -56,12 +66,6 @@ export type MemoryProposalOutcome =
 
 export type MemorySource = "user_explicit" | "ai_inferred";
 
-let idCounter = 0;
-function nextId(): string {
-  idCounter += 1;
-  return `mem_${Date.now()}_${idCounter}`;
-}
-
 /**
  * The single mediation point between "the AI or user wants to remember
  * something" and the actual store. `proposeMemory` is the ONLY way a
@@ -86,15 +90,15 @@ export class MemoryOrchestrator {
       return { success: false, reason: guardResult.reason ?? "content rejected by memory guard" };
     }
 
-    const entry: MemoryEntry = {
-      id: nextId(),
+    // No id assigned here — the store is the sole authority on id
+    // assignment (see MemoryBackingStore.add's doc comment above).
+    const persisted = await this.store.add({
       category,
       content,
       createdAt: new Date().toISOString(),
       userApproved: source === "user_explicit",
-    };
-    await this.store.add(entry);
-    return { success: true, entry };
+    });
+    return { success: true, entry: persisted };
   }
 
   /** Explicit consent action — the ONLY way an `ai_inferred` memory

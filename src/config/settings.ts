@@ -20,6 +20,19 @@ export interface JarvisSettings {
   cameraBasedStateEnabled: boolean;
   voiceBasedStateEnabled: boolean;
   behaviorBasedStateEnabled: boolean;
+
+  // Added during the Phase 7 productization pass: hand tracking was
+  // previously hardcoded `enableHands: true` at VisionPipeline
+  // construction (see App.tsx history) — there was no way to turn it off
+  // at all, let alone live. This closes that gap and, combined with
+  // `cameraBasedStateEnabled` already gating face detection the same way,
+  // resolves the "Vision Settings tab is decorative" / "duplicate
+  // settings object" issues tracked in PHASE-CONTINUITY.md (gaps #3, #6)
+  // by making THIS object — the one VisionPipeline actually reads — the
+  // single thing Settings' Vision tab controls, rather than maintaining a
+  // second, disconnected copy.
+  handTrackingEnabled: boolean;
+  poseTrackingEnabled: boolean;
 }
 
 export const DEFAULT_SETTINGS: JarvisSettings = {
@@ -40,4 +53,6 @@ export const DEFAULT_SETTINGS: JarvisSettings = {
   cameraBasedStateEnabled: false,
   voiceBasedStateEnabled: false,
   behaviorBasedStateEnabled: false,
+  handTrackingEnabled: true, // preserves the prior hardcoded behavior as the DEFAULT — this pass makes it toggleable, it does not change what a fresh install does
+  poseTrackingEnabled: true, // real upper-body motion tracking when the camera is explicitly started
 };

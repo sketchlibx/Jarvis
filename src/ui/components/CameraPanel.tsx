@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from "react";
+import { useEffect, useRef } from "react";
 import type { CameraStatus } from "../../types/vision";
 import type { FaceObservation, HandObservation, PoseObservation } from "../../types/perception";
 
@@ -15,6 +15,10 @@ interface Props {
    * than showing a fake 0 or placeholder. */
   cameraFps?: number;
   visionFps?: number;
+  /** Truthful qualitative vision state (Phase B.2) — lets the panel show
+   * "Vision unavailable" explicitly rather than leaving a `0 fps vision`
+   * number to be silently misread as "still warming up". */
+  visionAvailable?: "unknown" | "initializing" | "available" | "unavailable";
   onStart: () => void;
   onStop: () => void;
 }
@@ -54,7 +58,7 @@ const HAND_CONNECTIONS: Array<[number, number]> = [
  * not a coordinate transform we compute ourselves (spec section 15's
  * explicit warning against altering underlying coordinates for display reasons).
  */
-export function CameraPanel({ status, stream, hands, face, pose, cameraFps, visionFps, onStart, onStop }: Props) {
+export function CameraPanel({ status, stream, hands, face, pose, cameraFps, visionFps, visionAvailable, onStart, onStop }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -136,7 +140,7 @@ export function CameraPanel({ status, stream, hands, face, pose, cameraFps, visi
 
   if (status !== "on" && status !== "starting") {
     return (
-      <div className="glass-panel camera-panel">
+      <div className="glass-panel hud-frame camera-panel">
         <div className="camera-panel__off">
           <span>{STATUS_LABEL[status]}</span>
           {(status === "off" || status === "error") && (
@@ -148,9 +152,15 @@ export function CameraPanel({ status, stream, hands, face, pose, cameraFps, visi
   }
 
   const fpsLabel = cameraFps !== undefined && visionFps !== undefined ? ` · ${cameraFps} fps cam / ${visionFps} fps vision` : "";
+  // Phase B.2: never let a bare "0 fps vision" number stand as the only
+  // signal — say so explicitly, truthfully, only when a real attempt
+  // actually failed or hasn't completed (never inferred just from the
+  // camera being on).
+  const visionStatusLabel =
+    visionAvailable === "unavailable" ? " · Vision unavailable" : visionAvailable === "initializing" ? " · Vision loading…" : "";
 
   return (
-    <div className="glass-panel camera-panel">
+    <div className="glass-panel hud-frame camera-panel">
       <video ref={videoRef} autoPlay playsInline muted />
       <canvas ref={canvasRef} className="camera-panel__overlay-canvas" />
       <div className="camera-panel__badge">
@@ -158,6 +168,7 @@ export function CameraPanel({ status, stream, hands, face, pose, cameraFps, visi
         {STATUS_LABEL[status]} {hands.length > 0 && `· ${hands.length} hand(s)`}
         {face?.detected && " · face"} {pose?.detected && " · pose"}
         {fpsLabel}
+        {visionStatusLabel}
       </div>
       <div className="camera-panel__controls">
         <button className="camera-btn camera-btn--stop" onClick={onStop}>Stop Camera</button>

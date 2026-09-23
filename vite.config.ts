@@ -5,9 +5,6 @@ export default defineConfig({
   plugins: [react()],
   clearScreen: false,
   server: {
-    watch: {
-      ignored: ['**/src-tauri/target/**']
-    },
     port: 1420,
     strictPort: true,
   },

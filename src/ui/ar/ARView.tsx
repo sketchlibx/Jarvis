@@ -1,10 +1,11 @@
-import React, { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ARController } from "../../ar/ARController";
 import { ARControlBar } from "./ARControlBar";
 import { ARDebugOverlay } from "./ARDebugOverlay";
 import type { DesignController } from "../../design3d/commands/DesignController";
 import type { VisionPipeline } from "../../vision/VisionPipeline";
 import type { VisionPipelineStats } from "../../types/perception";
+import type { GestureLabel } from "../../types/perception";
 
 interface Props {
   designController: DesignController;
@@ -38,6 +39,7 @@ export function ARView({ designController, visionPipeline, cameraStream, selecte
   useEffect(() => { arEnabledRef.current = arEnabled; }, [arEnabled]);
   const [debugMode, setDebugMode] = useState(false);
   const [visionStats, setVisionStats] = useState<VisionPipelineStats | null>(null);
+  const [currentGesture, setCurrentGesture] = useState<GestureLabel | null>(null);
   const [, setStatsTick] = useState(0);
 
   useEffect(() => {
@@ -67,6 +69,12 @@ export function ARView({ designController, visionPipeline, cameraStream, selecte
       if (!arEnabledRef.current) return; // AR OFF: stop updating anchors/transforms entirely, not just hide the canvas
       const nowMs = Date.now();
       controller.update(nowMs, snapshot.hands, snapshot.face, snapshot.pose);
+      // Real gesture from the SAME snapshot VisionPipeline already
+      // produces (GestureEngine.classify() output) — not a second
+      // classifier. Mirrors the exact `gestures[0] ?? null` pattern
+      // VisionPipeline itself uses for PerceptionContext.
+      const gesture = snapshot.gestures[0];
+      setCurrentGesture(gesture && gesture.gesture !== "none" ? gesture.gesture : null);
       setStatsTick((t) => t + 1);
     });
     const unsubStats = visionPipeline.onStats(setVisionStats);
@@ -88,15 +96,7 @@ export function ARView({ designController, visionPipeline, cameraStream, selecte
     controllerRef.current?.setSelectedInstance(selectedInstanceIdFor(selectedDesignObjectId, controllerRef.current));
   }, [selectedDesignObjectId]);
 
-  const [stats, setStats] = useState<import("../../ar/ARController").ARControllerStats>({ trackingState: "UNAVAILABLE", handsDetected: 0, activeInstances: 0, selectedInstanceId: null });
-  useEffect(() => {
-    const interval = setInterval(() => {
-      if (controllerRef.current) {
-        setStats(controllerRef.current.getStats());
-      }
-    }, 100);
-    return () => clearInterval(interval);
-  }, []);
+  const stats = controllerRef.current?.getStats() ?? { trackingState: "UNAVAILABLE" as const, handsDetected: 0, activeInstances: 0, selectedInstanceId: null, selectedInteractionMode: null };
 
   return (
     <div className="ar-view studio-viewport">
@@ -107,21 +107,16 @@ export function ARView({ designController, visionPipeline, cameraStream, selecte
         onToggleAR={() => setArEnabled((e) => !e)}
         selectedObjectName={selectedDesignObjectId}
         trackingState={stats.trackingState}
-        currentGesture={null}
+        currentGesture={currentGesture}
+        interactionMode={stats.selectedInteractionMode}
         onOpenCalibration={() => { /* opens a calibration panel — see README for current scope */ }}
         debugMode={debugMode}
         onToggleDebug={() => setDebugMode((d) => !d)}
       />
       {debugMode && (
-        // eslint-disable-next-line react-hooks/refs
-        <ARDebugOverlay stats={stats as any} visionStats={visionStats} coordinateMappingReady={true} />
+        <ARDebugOverlay stats={stats} visionStats={visionStats} coordinateMappingReady={!!overlayContainerRef.current} />
       )}
-      <button
-        onClick={onExit}
-        style={{ position: "absolute", bottom: 12, right: 12, zIndex: 5, background: "rgba(0,0,0,0.5)", border: "1px solid var(--border-glass)", borderRadius: 6, color: "var(--text-primary)", padding: "6px 12px", fontSize: 12, cursor: "pointer" }}
-      >
-        Exit AR
-      </button>
+      <button className="ar-exit-btn" onClick={onExit}>Exit AR</button>
     </div>
   );
 }

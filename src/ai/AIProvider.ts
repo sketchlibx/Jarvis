@@ -120,6 +120,28 @@ class AIProviderRegistry {
     return [...this.entries.values()].map((e) => e.config);
   }
 
+  /** TEST-ONLY — clears every registered provider and the active-provider
+   * pointer. Production code has no legitimate reason to ever call this
+   * (there is no real scenario where an app wants to un-register every
+   * provider it knows about mid-run); it exists purely so test files that
+   * share this singleton across many `it()` blocks (see
+   * `AIProviderRouting.test.ts`) can achieve genuine per-test isolation.
+   *
+   * Root cause this fixes: without it, a provider registered in an
+   * earlier test remains a live routing candidate for every later test in
+   * the same file — if its capabilities/priority happen to overlap with a
+   * later test's own providers, it can win that later test's routing
+   * decision, producing results like "expected grok_4, received grok_2"
+   * even though `route()`'s actual logic (priority ordering, capability
+   * filtering, disabled/rate-limit exclusion, recovery) is correct in
+   * isolation. Confirmed by observing that the one test in the file using
+   * `forceProvider` (which bypasses the "pick best from all registered"
+   * path entirely) was unaffected, while every non-forced test was. */
+  resetForTesting(): void {
+    this.entries.clear();
+    this.activeName = null;
+  }
+
   /**
    * Deterministic routing (spec sections 4-5). Never sends a request to
    * every provider "just in case" — picks exactly one candidate at a time,
@@ -135,10 +157,17 @@ class AIProviderRegistry {
    * actually invoking it and reporting the outcome via `recordOutcome`.
    */
   route(request: RoutingRequest): RoutingResult {
-    if (this.entries.size === 0) {
-      return { success: false, reason: "no_providers_registered", attemptedProviders: [] };
-    }
-
+    // The forced-provider check comes FIRST, before the "is the whole
+    // registry empty" check — a request naming a specific provider
+    // deserves a specific answer about THAT provider regardless of how
+    // many other providers exist (zero or a thousand). Checking registry
+    // size first would report the less-useful generic
+    // "no_providers_registered" even when the real, actionable answer is
+    // "forced_provider_not_found" — the exact provider the caller asked
+    // about. This ordering also matches this method's own documented
+    // contract that a forced request "either uses that exact one or
+    // fails visibly," which is a statement about that ONE provider, not
+    // about the registry's overall population.
     if (request.forceProvider) {
       const entry = this.entries.get(request.forceProvider);
       if (!entry) {
@@ -150,10 +179,29 @@ class AIProviderRegistry {
       return { success: true, providerName: entry.config.name, attemptedProviders: [entry.config.name] };
     }
 
+    if (this.entries.size === 0) {
+      return { success: false, reason: "no_providers_registered", attemptedProviders: [] };
+    }
+
     const requiredCapability = TASK_REQUIRED_CAPABILITY[request.task];
     const candidates = [...this.entries.values()]
       .filter((e) => e.config.capabilities.includes(requiredCapability))
       .sort((a, b) => a.config.priority - b.config.priority);
+
+    // preferProvider: move it to the front of the (already
+    // capability-filtered) candidate list, WITHOUT removing anyone else
+    // or changing their relative order — so if the preferred provider
+    // turns out to be unusable, the loop below falls through to exactly
+    // the same fallback sequence it would have used without a
+    // preference. This is the entire mechanism — no separate "try
+    // preferred, then call route() again" bolted on beside it.
+    if (request.preferProvider) {
+      const preferredIndex = candidates.findIndex((e) => e.config.name === request.preferProvider);
+      if (preferredIndex > 0) {
+        const [preferred] = candidates.splice(preferredIndex, 1);
+        candidates.unshift(preferred);
+      }
+    }
 
     if (candidates.length === 0) {
       return { success: false, reason: "no_provider_supports_capability", attemptedProviders: [] };

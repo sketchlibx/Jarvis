@@ -1,4 +1,4 @@
-import React, { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
 import { SceneManager } from "../../design3d/engine/SceneManager";
 import { GraphRenderer } from "../../design3d/engine/GraphRenderer";
 import type { DesignController } from "../../design3d/commands/DesignController";
@@ -83,5 +83,5 @@ export const Viewport = forwardRef<ViewportHandle, Props>(function Viewport(
     sceneManagerRef.current?.setWireframe(wireframe);
   }, [wireframe]);
 
-  return <div ref={containerRef} className="studio-viewport glass-panel" />;
+  return <div ref={containerRef} className="studio-viewport glass-panel hud-frame" />;
 });

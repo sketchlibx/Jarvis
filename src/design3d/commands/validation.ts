@@ -1,4 +1,3 @@
-/* eslint-disable no-useless-escape */
 import type {
   ComponentParameters, ComponentType, DesignCommand, MaterialSpec, ResourceLimits, Transform, Vec3,
 } from "../types";

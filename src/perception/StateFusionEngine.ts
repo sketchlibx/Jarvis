@@ -36,17 +36,20 @@ export class StateFusionEngine {
     behavior: BehaviorSignal | null,
     _gesture: GestureSignal | null
   ): StateEstimate {
-    const votes: StateVote[] = [];
+    const votesBySource = new Map<StateSignalSource, StateVote[]>();
+    if (this.settings.voiceEnabled && voice) votesBySource.set("voice", this.voiceVotes(voice));
+    if (this.settings.faceEnabled && face) votesBySource.set("face", this.faceVotes(face));
+    if (this.settings.behaviorEnabled && behavior) votesBySource.set("behavior", this.behaviorVotes(behavior));
 
-    if (this.settings.voiceEnabled && voice) votes.push(...this.voiceVotes(voice));
-    if (this.settings.faceEnabled && face) votes.push(...this.faceVotes(face));
-    if (this.settings.behaviorEnabled && behavior) votes.push(...this.behaviorVotes(behavior));
+    const votes = [...votesBySource.values()].flat();
 
     if (votes.length === 0) {
       return { state: "neutral", confidence: 0, signals: [], timestamp: new Date().toISOString() };
     }
 
-    // Tally weighted votes per label.
+    // Tally weighted votes per label (used for the reported label/confidence
+    // magnitude when sources agree, and for the confidence magnitude even
+    // when they don't).
     const tally = new Map<StateLabel, number>();
     for (const v of votes) {
       tally.set(v.state, (tally.get(v.state) ?? 0) + v.weight);
@@ -55,13 +58,31 @@ export class StateFusionEngine {
     const sorted = [...tally.entries()].sort((a, b) => b[1] - a[1]);
     const [topLabel, topWeight] = sorted[0];
     const totalWeight = votes.reduce((sum, v) => sum + v.weight, 0);
-    const runnerUpWeight = sorted[1]?.[1] ?? 0;
 
-    // Conflict detection: if a competing label carries substantial weight
-    // relative to the winner, we do not confidently report the winner —
-    // this is the "voice suggests frustration, face suggests neutral →
-    // uncertain" behavior required by spec section 17.
-    const isConflicted = runnerUpWeight > 0 && runnerUpWeight / topWeight > 0.6;
+    // Conflict detection operates on each SOURCE's own dominant opinion,
+    // not on the pooled per-label tally above. This matters concretely:
+    // voice alone can cast several votes for the SAME label (e.g.
+    // `interruptionCount` AND `sentimentHint` both voting "frustrated"),
+    // and pooling those together before comparing against a single vote
+    // from face would make voice's combined weight dwarf face's — even
+    // though the actual disagreement ("voice says frustrated, face says
+    // calm") is exactly the two-source conflict spec section 17 requires
+    // resolving to "uncertain." Comparing each source's OWN top opinion
+    // sidesteps that entirely: it doesn't matter how many sub-votes
+    // produced a source's opinion, only what that source's single verdict
+    // is, so two disagreeing sources are detected regardless of how many
+    // internal signals fed into either one.
+    const sourceOpinions = [...votesBySource.entries()]
+      .filter(([, sourceVotes]) => sourceVotes.length > 0)
+      .map(([source, sourceVotes]) => {
+        const sourceTally = new Map<StateLabel, number>();
+        for (const v of sourceVotes) sourceTally.set(v.state, (sourceTally.get(v.state) ?? 0) + v.weight);
+        const [dominantLabel] = [...sourceTally.entries()].sort((a, b) => b[1] - a[1])[0];
+        return { source, dominantLabel };
+      });
+
+    const distinctDominantLabels = new Set(sourceOpinions.map((o) => o.dominantLabel));
+    const isConflicted = sourceOpinions.length >= 2 && distinctDominantLabels.size > 1;
 
     const sourcesUsed = [...new Set(votes.map((v) => v.source))];
     const rawConfidence = totalWeight > 0 ? topWeight / totalWeight : 0;

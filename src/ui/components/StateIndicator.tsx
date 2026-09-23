@@ -1,4 +1,3 @@
-import React from "react";
 import type { StateEstimate } from "../../types/perception";
 
 const STATE_PHRASING: Record<StateEstimate["state"], string> = {
